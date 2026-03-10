@@ -337,7 +337,7 @@ if not st.session_state.messages:
     else:
         welcome = (
             "안녕하세요? 옷 같이 봐드리는 미야언니예요 :) \n"
-            "궁금한 상품 링크나 상품명을 보내주시면 바로 같이 봐드릴게요. \n"
+            "24시간 상품에 대한 궁금한 점 말씀주시면 바로 같이 봐드릴게요. \n"
             "사이즈, 코디, 배송, 교환 중 뭐부터 이야기해볼까요?"
         )
     st.session_state.messages.append({"role": "assistant", "content": welcome})
