@@ -252,7 +252,7 @@ st.markdown(
         미샵 쇼핑친구 <span style="color:#0f6a63;">미야언니</span>
       </div>
       <div style="margin-top:6px; font-size:13.5px; line-height:1.35; color:var(--miya-text-sub);">
-        24시간 언제나 미샵님들 쇼핑 판단에 도움드리는 스마트한 쇼핑친구
+        24시간 언제나 쇼핑 판단에 도움드리는 스마트한 쇼핑친구
       </div>
     </div>
     """,
