@@ -691,6 +691,9 @@ div[data-testid="stChatInput"] textarea {
   caret-color: #ffffff !important;
   -webkit-text-fill-color: #ffffff !important;
   font-size: 16px !important;
+  line-height: 1.35 !important;
+  padding-top: 12px !important;
+  padding-bottom: 12px !important;
 }
 
 div[data-testid="stChatInput"] textarea::placeholder {
@@ -704,11 +707,15 @@ div[data-testid="stChatInput"] [data-baseweb="textarea"] {
   border-radius: 999px !important;
   border: 1px solid rgba(255,255,255,0.08) !important;
   min-height: 52px !important;
-  padding: 0 6px !important;
+  padding: 0 10px !important;
+  display: flex !important;
+  align-items: center !important;
 }
 
 div[data-testid="stChatInput"] [data-baseweb="textarea"] > div {
   background: transparent !important;
+  display: flex !important;
+  align-items: center !important;
 }
 
 div[data-testid="stChatInput"] button {
@@ -763,6 +770,9 @@ div[data-testid="stChatInput"] button svg {
   }
   div[data-testid="stChatInput"] [data-baseweb="textarea"]{
     min-height: 48px !important;
+    padding: 0 10px !important;
+    display: flex !important;
+    align-items: center !important;
   }
 }
 </style>
