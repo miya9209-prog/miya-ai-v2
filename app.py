@@ -626,14 +626,19 @@ footer {visibility:hidden;}
   --miya-bot-bg:#071b4e;
   --miya-user-bg:#dff0ec;
   --miya-user-text:#1f3b36;
+  --miya-page-bg:#f6f7fb;
   --miya-input-bg:#1f2537;
-  --miya-input-text:#f5f7ff;
-  --miya-input-placeholder:#b9c0d4;
+  --miya-input-text:#f7f9ff;
+  --miya-input-placeholder:#d2d7e6;
+  --miya-input-shell:#e7eaf2;
 }
 
 html, body, [data-testid="stAppViewContainer"], [data-testid="stMainBlockContainer"] {
   color: var(--miya-title);
+  background: var(--miya-page-bg) !important;
 }
+[data-testid="stAppViewContainer"] > .main {background: var(--miya-page-bg) !important;}
+.block-container{background: var(--miya-page-bg) !important;}
 
 div[data-testid="column"]{
   min-width:0 !important;
@@ -669,6 +674,14 @@ div[data-testid="stChatInput"]{
   bottom:68px !important;
   width:min(720px, calc(100% - 24px)) !important;
   z-index:9999 !important;
+  background: transparent !important;
+}
+
+div[data-testid="stChatInput"] > div{
+  background: var(--miya-input-shell) !important;
+  border-radius: 16px !important;
+  padding: 10px 12px !important;
+  box-shadow: none !important;
 }
 
 div[data-testid="stChatInput"] textarea {
@@ -676,6 +689,7 @@ div[data-testid="stChatInput"] textarea {
   color: var(--miya-input-text) !important;
   caret-color: var(--miya-input-text) !important;
   -webkit-text-fill-color: var(--miya-input-text) !important;
+  font-size: 16px !important;
 }
 
 div[data-testid="stChatInput"] textarea::placeholder {
@@ -686,12 +700,23 @@ div[data-testid="stChatInput"] textarea::placeholder {
 
 div[data-testid="stChatInput"] [data-baseweb="textarea"] {
   background: var(--miya-input-bg) !important;
-  border-radius: 14px !important;
+  border-radius: 999px !important;
+  border: 1px solid rgba(255,255,255,0.05) !important;
+  min-height: 52px !important;
+}
+
+div[data-testid="stChatInput"] [data-baseweb="textarea"] > div {
+  background: transparent !important;
 }
 
 div[data-testid="stChatInput"] button {
-  background: #2b3552 !important;
-  color: #f5f7ff !important;
+  background: #2f3a5f !important;
+  color: #f7f9ff !important;
+  border-radius: 14px !important;
+}
+
+div[data-testid="stChatInput"] button svg {
+  fill: #f7f9ff !important;
 }
 
 @media (max-width: 768px){
@@ -728,6 +753,13 @@ div[data-testid="stChatInput"] button {
   div[data-testid="stChatInput"]{
     bottom:64px !important;
     width:calc(100% - 16px) !important;
+  }
+  div[data-testid="stChatInput"] > div{
+    padding: 8px 10px !important;
+    border-radius: 16px !important;
+  }
+  div[data-testid="stChatInput"] [data-baseweb="textarea"]{
+    min-height: 48px !important;
   }
 }
 </style>
