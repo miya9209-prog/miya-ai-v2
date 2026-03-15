@@ -678,31 +678,33 @@ div[data-testid="stChatInput"]{
 }
 
 div[data-testid="stChatInput"] > div{
-  background: var(--miya-input-shell) !important;
-  border-radius: 16px !important;
-  padding: 10px 12px !important;
+  background: transparent !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
   box-shadow: none !important;
+  border: none !important;
 }
 
 div[data-testid="stChatInput"] textarea {
-  background: var(--miya-input-bg) !important;
-  color: var(--miya-input-text) !important;
-  caret-color: var(--miya-input-text) !important;
-  -webkit-text-fill-color: var(--miya-input-text) !important;
+  background: #1f2740 !important;
+  color: #ffffff !important;
+  caret-color: #ffffff !important;
+  -webkit-text-fill-color: #ffffff !important;
   font-size: 16px !important;
 }
 
 div[data-testid="stChatInput"] textarea::placeholder {
-  color: var(--miya-input-placeholder) !important;
+  color: #cfd6e6 !important;
   opacity: 1 !important;
-  -webkit-text-fill-color: var(--miya-input-placeholder) !important;
+  -webkit-text-fill-color: #cfd6e6 !important;
 }
 
 div[data-testid="stChatInput"] [data-baseweb="textarea"] {
-  background: var(--miya-input-bg) !important;
+  background: #1f2740 !important;
   border-radius: 999px !important;
-  border: 1px solid rgba(255,255,255,0.05) !important;
+  border: 1px solid rgba(255,255,255,0.08) !important;
   min-height: 52px !important;
+  padding: 0 6px !important;
 }
 
 div[data-testid="stChatInput"] [data-baseweb="textarea"] > div {
@@ -711,12 +713,12 @@ div[data-testid="stChatInput"] [data-baseweb="textarea"] > div {
 
 div[data-testid="stChatInput"] button {
   background: #2f3a5f !important;
-  color: #f7f9ff !important;
+  color: #ffffff !important;
   border-radius: 14px !important;
 }
 
 div[data-testid="stChatInput"] button svg {
-  fill: #f7f9ff !important;
+  fill: #ffffff !important;
 }
 
 @media (max-width: 768px){
@@ -755,8 +757,9 @@ div[data-testid="stChatInput"] button svg {
     width:calc(100% - 16px) !important;
   }
   div[data-testid="stChatInput"] > div{
-    padding: 8px 10px !important;
-    border-radius: 16px !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+    background: transparent !important;
   }
   div[data-testid="stChatInput"] [data-baseweb="textarea"]{
     min-height: 48px !important;
