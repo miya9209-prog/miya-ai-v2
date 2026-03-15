@@ -55,19 +55,25 @@ SYSTEM_PROMPT = """
 
 말투 규칙:
 - 친근한 MD 상담체
-- "옵션 중", "표기상", "기준으로 보면", "가능성이 높아요" 같은 딱딱한 표현은 되도록 쓰지 않는다.
-- "이 상품은", "고객님 체형이면", "같이 입으시면"처럼 부드럽고 자연스럽게 말한다.
+- "옵션 중", "표기상", "기준으로 보면", "가능성이 높아요", "등록되어 있지 않다" 같은 기계적인 표현은 쓰지 않는다.
+- "고객님 체형이면", "이 상품이랑 같이 입으시면", "이런 자리에는"처럼 자연스럽게 말한다.
+- 답을 바로 먼저 말하고, 뒤에 이유를 붙인다.
 - 상품명이 확실할 때만 상품명을 쓴다.
 - 상품명이 불확실하면 "지금 보시는 상품"이라고 말한다.
 - 고객 체형 정보가 있으면 꼭 참고해서 말한다.
 - 정보가 부족하면 짧게 필요한 부분만 다시 물어본다.
+
+추천 답변 규칙:
+- 추천 질문에는 일반론으로 돌리지 말고, 가능한 한 실제 상품명 2~3개를 먼저 제시한다.
+- 추천 후보가 1개만 명확하면 그 1개를 먼저 말하고, 비슷한 결의 다른 후보도 1~2개 더 붙여준다.
+- 추천 후보를 찾기 어려울 때도 "등록이 안 되어" 같은 표현 대신 "지금 DB에서 먼저 눈에 들어오는 건"처럼 부드럽게 말한다.
+- 추천 상품을 말할 때는 왜 어울리는지 1~2가지 이유를 같이 붙인다.
 
 중요 규칙:
 - 상품명은 반드시 제공된 DB 추천 후보 안에서만 말한다. 없는 미샵 상품명을 절대 만들지 않는다.
 - 컬러는 확인된 옵션 안에서만 말한다. 없는 컬러를 추측해서 말하지 않는다.
 - 현재 상품의 사이즈 제한을 넘는 고객에게 "잘 맞는다", "여유 있다", "추천드린다"라고 말하지 않는다.
 - 가격/옵션/스펙은 현재 페이지와 제공된 데이터 기준으로만 말하고 지어내지 않는다.
-- 추천 상품을 말할 때는 왜 어울리는지 1~2가지 이유를 같이 붙인다.
 
 답변 스타일:
 - 3~7문장 내외
@@ -442,7 +448,7 @@ def is_recommendation_question(user_text: str):
     return any(k in q for k in keywords)
 
 
-def infer_target_category_from_query(user_text: str):
+def infer_target_category_from_query(user_text: str, current_product: dict | None = None):
     q = clean_text(user_text)
     mapping = [
         ("팬츠", ["바지", "슬랙스", "팬츠", "데님", "청바지"]),
@@ -457,7 +463,48 @@ def infer_target_category_from_query(user_text: str):
     for target, words in mapping:
         if any(w in q for w in words):
             return target
+
+    if any(k in q for k in ["어울", "같이 입", "코디", "매치"]):
+        current_cat = clean_text((current_product or {}).get("category", ""))
+        current_sub = clean_text((current_product or {}).get("sub_category", ""))
+        corpus = f"{current_cat} {current_sub}"
+        if any(k in corpus for k in ["셔츠", "블라우스", "니트", "티셔츠", "맨투맨", "가디건", "자켓", "아우터"]):
+            return "팬츠"
+        if any(k in corpus for k in ["팬츠", "슬랙스", "데님", "스커트"]):
+            return "블라우스"
     return ""
+
+
+def extract_preference_keywords(user_text: str):
+    q = clean_text(user_text)
+    keywords = [
+        "슬랙스", "데님", "청바지", "와이드", "세미와이드", "일자", "부츠컷", "배기",
+        "A라인", "정핏", "루즈핏", "단정", "학교", "방문", "출근", "하객", "데일리",
+        "블랙", "네이비", "베이지", "아이보리", "그레이"
+    ]
+    return [k for k in keywords if k in q]
+
+
+def row_text_blob(rowd: dict) -> str:
+    cols = [
+        "product_name", "category", "sub_category", "fit_type", "body_cover_features",
+        "style_tags", "coordination_items", "product_summary", "recommended_body_type"
+    ]
+    return " ".join([clean_text(rowd.get(c, "")) for c in cols])
+
+
+def category_aliases(target: str):
+    mapping = {
+        "팬츠": ["팬츠", "슬랙스", "데님", "청바지", "바지"],
+        "스커트": ["스커트", "치마"],
+        "자켓": ["자켓", "재킷", "아우터"],
+        "가디건": ["가디건"],
+        "니트": ["니트"],
+        "셔츠": ["셔츠"],
+        "블라우스": ["블라우스", "셔츠"],
+        "원피스": ["원피스"],
+    }
+    return mapping.get(target, [target] if target else [])
 
 
 def build_product_reason(rowd: dict, current_product: dict | None, user_text: str):
@@ -465,22 +512,30 @@ def build_product_reason(rowd: dict, current_product: dict | None, user_text: st
     fit = clean_text(rowd.get("fit_type", ""))
     cover = clean_text(rowd.get("body_cover_features", ""))
     style = clean_text(rowd.get("style_tags", ""))
-    coord = clean_text(rowd.get("coordination_items", ""))
     summary = clean_text(rowd.get("product_summary", ""))
+    sub = clean_text(rowd.get("sub_category", ""))
+    name = clean_text(rowd.get("product_name", ""))
 
     if "학교" in user_text or "방문" in user_text:
-        if any(k in style for k in ["클래식", "데일리", "페미닌"]):
-            reasons.append("학교 방문룩으로 깔끔하게 입기 좋아요")
-        else:
-            reasons.append("과하게 튀지 않아서 단정하게 매치하기 좋아요")
+        reasons.append("학교 방문룩에 너무 튀지 않고 단정하게 받쳐주기 좋아요")
+    elif "출근" in user_text:
+        reasons.append("출근룩으로 깔끔하게 매치하기 좋아요")
+    elif "하객" in user_text:
+        reasons.append("격식 있는 자리에도 무리 없이 입기 좋아요")
+
+    if "슬랙스" in name or "슬랙스" in sub:
+        reasons.append("라인이 정돈돼 보여서 상의를 깔끔하게 살려줘요")
+    elif "데님" in name or "데님" in sub:
+        reasons.append("너무 힘주지 않은 분위기로 데일리하게 코디하기 좋아요")
 
     if fit:
         fit_map = {
-            "정핏": "핏이 단정하게 떨어져서",
+            "정핏": "핏이 단정하게 떨어져서", 
             "세미루즈": "너무 붙지 않게 떨어져서",
-            "루즈": "편안하게 입기 좋고",
-            "세미와이드": "다리라인을 편하게 커버해줘서",
-            "와이드": "하체라인을 자연스럽게 정리해줘서",
+            "루즈": "편하게 입으면서도 답답한 느낌이 덜해서",
+            "세미와이드": "다리라인을 자연스럽게 정리해줘서",
+            "와이드": "하체라인 부담을 덜어줘서",
+            "배기": "복부와 힙라인을 편하게 감싸줘서",
         }
         for key, sentence in fit_map.items():
             if key in fit:
@@ -490,19 +545,24 @@ def build_product_reason(rowd: dict, current_product: dict | None, user_text: st
     if cover:
         if "뱃살커버" in cover:
             reasons.append("복부라인 부담을 덜어줘요")
-        elif "힙커버" in cover:
+        if "힙커버" in cover:
             reasons.append("힙라인이 드러나는 부담이 적어요")
-        elif "허리라인보정" in cover:
+        if "허리라인보정" in cover:
             reasons.append("허리선이 좀 더 정돈돼 보여요")
 
-    if not reasons and summary:
-        reasons.append(summary[:40])
+    if not reasons and style:
+        if "클래식" in style:
+            reasons.append("클래식한 분위기로 코디가 정돈돼 보여요")
+        elif "데일리" in style:
+            reasons.append("평소에도 손이 잘 가는 스타일이에요")
 
-    # dedupe keep order
-    out=[]
-    seen=set()
+    if not reasons and summary:
+        reasons.append(summary[:46])
+
+    out = []
+    seen = set()
     for r in reasons:
-        r=clean_text(r)
+        r = clean_text(r)
         if r and r not in seen:
             seen.add(r)
             out.append(r)
@@ -513,7 +573,8 @@ def recommend_products_for_query(user_text: str, current_product: dict | None, b
     if DB.empty:
         return []
 
-    target = infer_target_category_from_query(user_text)
+    target = infer_target_category_from_query(user_text, current_product)
+    preferred_words = extract_preference_keywords(user_text)
     current_no = normalize_product_no((current_product or {}).get("product_no", ""))
     bottom_size = clean_text(body_ctx.get("bottom_size", ""))
     top_size = clean_text(body_ctx.get("top_size", ""))
@@ -525,14 +586,9 @@ def recommend_products_for_query(user_text: str, current_product: dict | None, b
         candidates["product_no"] = candidates["product_no"].map(normalize_product_no)
         candidates = candidates[candidates["product_no"] != current_no]
 
-    if target:
-        mask = (candidates.get("category", "").astype(str).str.contains(target, na=False)) | (candidates.get("sub_category", "").astype(str).str.contains(target, na=False))
-        filtered = candidates[mask]
-        if len(filtered) > 0:
-            candidates = filtered
-
     current_coord = clean_text((current_product or {}).get("coordination_items", ""))
     current_style = clean_text((current_product or {}).get("style_tags", ""))
+    target_alias = category_aliases(target)
 
     scored = []
     for _, row in candidates.iterrows():
@@ -541,32 +597,46 @@ def recommend_products_for_query(user_text: str, current_product: dict | None, b
         if not name:
             continue
 
+        blob = row_text_blob(rowd)
+        row_cat = clean_text(rowd.get("category", ""))
+        row_sub = clean_text(rowd.get("sub_category", ""))
         size_text = clean_text(rowd.get("size_range", ""))
         ranks = expand_size_text(size_text)
+
         if target in ["팬츠", "스커트"] and bottom_rank and ranks and bottom_rank not in ranks:
             continue
-        if target not in ["팬츠", "스커트"] and top_rank and ranks and top_rank not in ranks:
+        if target not in ["", "팬츠", "스커트"] and top_rank and ranks and top_rank not in ranks:
             continue
 
         score = 0
-        row_cat = clean_text(rowd.get("category", ""))
-        row_sub = clean_text(rowd.get("sub_category", ""))
-        if target and (target in row_cat or target in row_sub):
-            score += 6
-        if current_coord and any(x and x in current_coord for x in [row_cat, row_sub, target]):
-            score += 4
+        if target_alias and any(alias in blob for alias in target_alias):
+            score += 10
+        if preferred_words:
+            pref_hits = sum(1 for word in preferred_words if word in blob)
+            score += pref_hits * 4
+            if pref_hits == 0 and any(w in ["슬랙스", "데님", "청바지"] for w in preferred_words) and target == "팬츠":
+                continue
+        if current_coord and any(x and x in current_coord for x in [row_cat, row_sub] + target_alias):
+            score += 5
         if current_style and clean_text(rowd.get("style_tags", "")):
             overlap = set([clean_text(x) for x in re.split(r"[;,/|]", current_style) if clean_text(x)]) & set([clean_text(x) for x in re.split(r"[;,/|]", clean_text(rowd.get("style_tags", ""))) if clean_text(x)])
             score += len(overlap) * 2
+        if "학교" in user_text or "방문" in user_text:
+            if any(k in blob for k in ["클래식", "데일리", "단정", "슬랙스"]):
+                score += 5
+        if "출근" in user_text and any(k in blob for k in ["클래식", "데일리", "슬랙스", "셔츠"]):
+            score += 4
         if clean_text(rowd.get("recommended_age", "")) in ["4050", "40", "50"]:
             score += 1
         if clean_text(rowd.get("body_cover_features", "")):
             score += 1
+        if target == "팬츠" and any(k in blob for k in ["슬랙스", "팬츠", "데님"]):
+            score += 2
         scored.append((score, rowd))
 
     scored.sort(key=lambda x: x[0], reverse=True)
-    out=[]
-    seen=set()
+    out = []
+    seen = set()
     for score, rowd in scored:
         name = clean_text(rowd.get("product_name", ""))
         if name in seen:
@@ -593,18 +663,27 @@ def build_recommendation_answer(user_text: str, product_context: dict | None, db
     if not recos:
         return None
 
-    target = infer_target_category_from_query(user_text)
+    target = infer_target_category_from_query(user_text, db_product)
     target_kor = {"팬츠":"바지", "스커트":"스커트", "자켓":"자켓", "가디건":"가디건", "니트":"니트", "셔츠":"셔츠", "블라우스":"블라우스", "원피스":"원피스"}.get(target, "아이템")
-    opener = f"이런 자리에는 {target_kor}를 너무 힘줘 보이기보다 깔끔하게 잡아주는 쪽이 잘 어울려요." if target else "이럴 때는 지금 보시는 상품이랑 톤이 맞는 아이템으로 같이 보시는 게 좋아요."
 
-    lines = [opener, "미샵에서 같이 보기 좋은 상품으로는 아래 쪽을 먼저 추천드릴게요."]
-    for r in recos:
+    if target == "팬츠":
+        opener = "네, 이 상품이랑 같이 입기 좋은 바지로 먼저 골라드릴게요."
+    elif target == "스커트":
+        opener = "네, 이 상품 분위기랑 잘 맞는 스커트로 먼저 골라드릴게요."
+    else:
+        opener = "네, 지금 보시는 상품이랑 같이 보기 좋은 쪽으로 먼저 골라드릴게요."
+
+    lines = [opener]
+    for idx, r in enumerate(recos, start=1):
         reason = " / ".join(r["reasons"]) if r.get("reasons") else "무난하게 매치하기 좋아요"
-        size_tail = f" · {r['size_range']}" if r.get("size_range") else ""
-        lines.append(f"- {r['product_name']}{size_tail}: {reason}")
+        size_tail = f" ({r['size_range']})" if r.get("size_range") else ""
+        lead = "특히" if idx == 1 else "같이 보시면"
+        lines.append(f"{lead} {r['product_name']}{size_tail} 추천드려요. {reason}")
 
     if target in ["팬츠", "스커트"] and clean_text(body_ctx.get("bottom_size", "")):
-        lines.append(f"고객님 하의 {body_ctx.get('bottom_size')} 기준으로 너무 타이트한 느낌보다 편하게 떨어지는 핏 위주로 골랐어요.")
+        lines.append(f"고객님 하의 {body_ctx.get('bottom_size')} 기준으로 너무 붙는 느낌보다 편하게 떨어지는 쪽 위주로 골랐어요.")
+    elif clean_text(body_ctx.get("top_size", "")):
+        lines.append(f"고객님 상의 {body_ctx.get('top_size')} 기준으로 같이 매치하기 쉬운 쪽부터 골라봤어요.")
 
     return "\n".join(lines)
 
@@ -678,7 +757,7 @@ def build_size_guard_answer(user_text: str, product_context: dict | None, db_pro
     if supported is False:
         recos = recommend_alternative_products(db_product, user_top, limit=3)
         lines = [
-            f"고객님 상의 {user_top} 기준이면 지금 보시는 상품은 편하게 맞는다고 보긴 어려워요.",
+            f"고객님 상의 {user_top} 기준이면 이 상품은 조금 타이트하게 느껴지실 수 있어요.",
             size_eval.get("reason", "현재 확인되는 사이즈 범위가 조금 작게 보여요."),
         ]
         if recos:
@@ -703,9 +782,9 @@ def build_size_guard_answer(user_text: str, product_context: dict | None, db_pro
     if supported is True and size_eval.get("matched_option"):
         opt = size_eval["matched_option"]
         return (
-            f"고객님 상의 {user_top} 기준이면 현재 페이지에 있는 옵션 중 {opt['label']} 쪽으로 보시는 게 가장 자연스러워요.\n"
-            f"지금 보이는 사이즈 표기상 {opt['label']}는 {opt['size_desc']} 기준이라 고객님 체형에 더 가깝게 맞을 가능성이 높아요.\n"
-            f"너무 딱 맞는 느낌보다 편안함을 원하시면 이 옵션을 우선 보시는 쪽이 좋아요."
+            f"고객님 상의 {user_top} 기준이면 {opt['label']} 사이즈 쪽이 가장 편하게 보실 만해요.\n"
+            f"이 상품은 {opt['label']}가 {opt['size_desc']} 정도로 안내돼 있어서 고객님 체형에 더 가깝게 맞을 것 같아요.\n"
+            f"너무 딱 맞는 느낌보다 편하게 입고 싶으시면 이쪽부터 보시면 좋아요."
         )
 
     return None
@@ -716,7 +795,7 @@ def build_color_guard_answer(user_text: str, product_context: dict | None, db_pr
         return None
     colors = parse_color_options(product_context, db_product)
     if not colors:
-        return "현재 확인되는 컬러 옵션이 분명하지 않아서 없는 색을 추측해서 말씀드리긴 어려워요. 상세페이지 옵션창에 보이는 색상 기준으로 다시 같이 봐드릴게요 :)"
+        return "지금 페이지에서 컬러가 또렷하게 잡히지 않아서 없는 색을 제가 임의로 말씀드리긴 어려워요. 옵션창에 보이는 색상 기준으로 같이 봐드릴게요 :)"
     return f"현재 확인되는 컬러는 {', '.join(colors)} 쪽이에요. 없는 색을 추측해서 말씀드리기보다는 지금 보이는 옵션 기준으로 같이 봐드릴게요 :)"
 
 
@@ -724,6 +803,7 @@ def get_llm_answer(user_text: str, current_url: str, product_no_value: str, prod
     body_context = build_body_context()
     confirmed_colors = parse_color_options(product_context, db_product)
     alt_products = recommend_alternative_products(db_product, body_context.get("top_size", ""), limit=3)
+    reco_candidates = recommend_products_for_query(user_text, db_product, body_context, limit=3) if is_recommendation_question(user_text) else []
 
     context_pack = {
         "policy_db": POLICY_DB,
@@ -737,6 +817,7 @@ def get_llm_answer(user_text: str, current_url: str, product_no_value: str, prod
         "db_product": db_product,
         "confirmed_colors": confirmed_colors,
         "alternative_products": alt_products,
+        "recommendation_candidates": reco_candidates,
     }
 
     messages = [
