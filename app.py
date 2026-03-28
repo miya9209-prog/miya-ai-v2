@@ -21,7 +21,7 @@ if not OPENAI_API_KEY:
     st.error("OPENAI_API_KEY가 필요합니다. Streamlit Secrets에 OPENAI_API_KEY를 추가해주세요.")
     st.stop()
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+client = OpenAI(api_key=OPENAI_API_KEY, timeout=25.0, max_retries=1)
 
 POLICY_DB = {
     "shipping": {
@@ -99,7 +99,11 @@ def ensure_state():
         "body_height": "",
         "body_weight": "",
         "body_top": "",
-        "body_bottom": ""
+        "body_bottom": "",
+        "is_processing": False,
+        "last_user_hash": "",
+        "last_user_ts": 0.0,
+        "last_answer_text": ""
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -117,6 +121,10 @@ context_key = f"{current_url}|{product_no}|{product_name_q}"
 if context_key != st.session_state.last_context_key:
     st.session_state.last_context_key = context_key
     st.session_state.messages = []
+    st.session_state.is_processing = False
+    st.session_state.last_user_hash = ""
+    st.session_state.last_user_ts = 0.0
+    st.session_state.last_answer_text = ""
 
 
 def clean_text(text: str) -> str:
@@ -137,6 +145,23 @@ def normalize_product_no(value: str) -> str:
     if value.endswith('.0'):
         value = value[:-2]
     return value
+
+
+def build_user_hash(user_text: str, current_url: str, product_no_value: str) -> str:
+    base = f"{clean_text(user_text)}|{clean_text(current_url)}|{clean_text(product_no_value)}"
+    return __import__("hashlib").md5(base.encode("utf-8")).hexdigest()
+
+
+def is_duplicate_submission(user_text: str, current_url: str, product_no_value: str, within_seconds: float = 4.0) -> bool:
+    user_hash = build_user_hash(user_text, current_url, product_no_value)
+    now = time.time()
+    last_hash = st.session_state.get("last_user_hash", "")
+    last_ts = float(st.session_state.get("last_user_ts", 0.0) or 0.0)
+    if user_hash == last_hash and (now - last_ts) <= within_seconds:
+        return True
+    st.session_state["last_user_hash"] = user_hash
+    st.session_state["last_user_ts"] = now
+    return False
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -903,6 +928,7 @@ def build_color_guard_answer(user_text: str, product_context: dict | None, db_pr
 
 def get_llm_answer(user_text: str, current_url: str, product_no_value: str, product_context: dict | None, db_product: dict | None) -> str:
     body_context = build_body_context()
+    llm_start = time.time()
     confirmed_colors = parse_color_options(product_context, db_product)
     alt_products = recommend_alternative_products(db_product, body_context.get("top_size", ""), limit=3)
     reco_candidates = recommend_products_for_query(user_text, db_product, body_context, limit=3) if is_recommendation_question(user_text) else []
@@ -938,6 +964,7 @@ def get_llm_answer(user_text: str, current_url: str, product_no_value: str, prod
         if wait_seconds:
             time.sleep(wait_seconds)
         try:
+            print(f"[MIYA LLM CALL START] product_no={product_no_value or '-'} history={len(history)} user_len={len(clean_text(user_text))}")
             resp = client.chat.completions.create(
                 model="gpt-4.1-mini",
                 messages=messages,
@@ -946,6 +973,7 @@ def get_llm_answer(user_text: str, current_url: str, product_no_value: str, prod
             )
             content = (resp.choices[0].message.content or "").strip()
             if content:
+                print(f"[MIYA LLM CALL END] elapsed={time.time() - llm_start:.2f}s")
                 return content
         except (RateLimitError, APITimeoutError, APIError) as e:
             last_error = e
@@ -959,30 +987,57 @@ def get_llm_answer(user_text: str, current_url: str, product_no_value: str, prod
 
 
 def process_user_message(user_text: str, current_url: str, product_no_value: str, product_context: dict | None, db_product: dict | None):
+    user_text = clean_text(user_text)
+    if not user_text:
+        return
+
+    if st.session_state.get("is_processing", False):
+        print("[MIYA DUPLICATE BLOCK] processing lock active")
+        return
+
+    if is_duplicate_submission(user_text, current_url, product_no_value):
+        print("[MIYA DUPLICATE BLOCK] same question submitted again too quickly")
+        last_answer = clean_text(st.session_state.get("last_answer_text", ""))
+        if last_answer:
+            st.session_state.messages.append({"role": "assistant", "content": last_answer})
+        else:
+            st.session_state.messages.append({"role": "assistant", "content": "방금 같은 질문이 한 번 더 들어와서, 답변이 겹치지 않게 잠깐만 정리해서 이어드릴게요 :)"})
+        return
+
+    st.session_state["is_processing"] = True
     st.session_state.messages.append({"role": "user", "content": user_text})
 
-    fast = get_fast_policy_answer(user_text)
-    if fast:
-        st.session_state.messages.append({"role": "assistant", "content": fast})
-        return
+    try:
 
-    size_guard = build_size_guard_answer(user_text, product_context, db_product)
-    if size_guard:
-        st.session_state.messages.append({"role": "assistant", "content": size_guard})
-        return
+        fast = get_fast_policy_answer(user_text)
+        if fast:
+            st.session_state.messages.append({"role": "assistant", "content": fast})
+            st.session_state["last_answer_text"] = fast
+            return
 
-    rec_guard = build_recommendation_answer(user_text, product_context, db_product)
-    if rec_guard:
-        st.session_state.messages.append({"role": "assistant", "content": rec_guard})
-        return
+        size_guard = build_size_guard_answer(user_text, product_context, db_product)
+        if size_guard:
+            st.session_state.messages.append({"role": "assistant", "content": size_guard})
+            st.session_state["last_answer_text"] = size_guard
+            return
 
-    color_guard = build_color_guard_answer(user_text, product_context, db_product)
-    if color_guard and ("무슨" in user_text or "어떤" in user_text or "컬러" in user_text or "색상" in user_text):
-        st.session_state.messages.append({"role": "assistant", "content": color_guard})
-        return
+        rec_guard = build_recommendation_answer(user_text, product_context, db_product)
+        if rec_guard:
+            st.session_state.messages.append({"role": "assistant", "content": rec_guard})
+            st.session_state["last_answer_text"] = rec_guard
+            return
 
-    answer = get_llm_answer(user_text, current_url, product_no_value, product_context, db_product)
-    st.session_state.messages.append({"role": "assistant", "content": answer})
+        color_guard = build_color_guard_answer(user_text, product_context, db_product)
+        if color_guard and ("무슨" in user_text or "어떤" in user_text or "컬러" in user_text or "색상" in user_text):
+            st.session_state.messages.append({"role": "assistant", "content": color_guard})
+            st.session_state["last_answer_text"] = color_guard
+            return
+
+        answer = get_llm_answer(user_text, current_url, product_no_value, product_context, db_product)
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+        st.session_state["last_answer_text"] = answer
+    finally:
+        st.session_state["is_processing"] = False
 
 
 product_context = fetch_product_context_cached(current_url, product_name_q) if current_url else None
