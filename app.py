@@ -960,13 +960,28 @@ def build_size_fallback_answer(user_text: str, product_context: dict | None, db_
 
 def safe_llm_fallback(user_text: str, product_context: dict | None = None, db_product: dict | None = None) -> str:
     text = clean_text(user_text)
+
+    size_answer = build_size_fallback_answer(text, product_context, db_product)
+    if size_answer:
+        return size_answer
+
     if is_recommendation_question(text):
+        rec_answer = build_recommendation_answer(text, product_context, db_product)
+        if rec_answer:
+            return rec_answer
         return "지금 문의가 잠시 몰려서 추천 답변이 바로 안 붙고 있어요. 잠깐 뒤 다시 한번만 보내주시면, 실제 등록된 상품 기준으로 바로 골라드릴게요 :)"
+
     if is_color_question(text):
+        color_answer = build_color_guard_answer(text, product_context, db_product)
+        if color_answer:
+            return color_answer
         return "지금 문의가 잠시 몰려서 답변 연결이 늦어지고 있어요. 컬러는 옵션창에 보이는 기준으로 먼저 봐주시면 되고, 잠깐 뒤 다시 보내주시면 더 정확히 같이 봐드릴게요 :)"
+
     if any(k in text for k in ["배송", "출고", "언제 와", "교환", "반품"]):
         return "지금 문의가 잠시 몰린 상태예요. 배송은 오후 2시 이전 주문이면 당일 출고, 일반적으로는 결제 후 2~4영업일 정도로 봐주시면 돼요. 교환/반품은 수령 후 7일 이내 접수 가능해요 :)"
-    return "지금 문의가 잠시 몰려서 답변 연결이 늦어지고 있어요. 같은 내용을 잠깐 뒤 한 번만 다시 보내주시면 바로 이어서 도와드릴게요 :)"
+
+    current_name = clean_text((db_product or {}).get("product_name", "")) or clean_text((product_context or {}).get("product_name", "")) or "지금 보시는 상품"
+    return f"지금 문의가 잠시 몰려서 답변 연결이 늦어지고 있어요. 우선 {current_name} 기준으로 제가 이어서 같이 봐드릴게요 :) 잠깐 뒤 다시 보내주시면 더 정확하게 도와드릴게요."
 
 def build_color_guard_answer(user_text: str, product_context: dict | None, db_product: dict | None):
     if not is_color_question(user_text):
