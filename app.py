@@ -958,7 +958,7 @@ def build_size_fallback_answer(user_text: str, product_context: dict | None, db_
     )
 
 
-def safe_llm_fallback(user_text: str) -> str:
+def safe_llm_fallback(user_text: str, product_context: dict | None = None, db_product: dict | None = None) -> str:
     text = clean_text(user_text)
     if is_recommendation_question(text):
         return "지금 문의가 잠시 몰려서 추천 답변이 바로 안 붙고 있어요. 잠깐 뒤 다시 한번만 보내주시면, 실제 등록된 상품 기준으로 바로 골라드릴게요 :)"
