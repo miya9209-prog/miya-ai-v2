@@ -3,11 +3,12 @@ import os
 import re
 import json
 import html
+import time
 import requests
 import pandas as pd
 import streamlit as st
 from bs4 import BeautifulSoup
-from openai import OpenAI
+from openai import OpenAI, RateLimitError, APIError, APITimeoutError
 
 st.set_page_config(
     page_title="미야언니",
@@ -838,6 +839,59 @@ def build_size_guard_answer(user_text: str, product_context: dict | None, db_pro
     return None
 
 
+
+
+def trim_text(value, max_len=600):
+    value = clean_text(value)
+    if len(value) <= max_len:
+        return value
+    return value[:max_len] + "…"
+
+
+def slim_product_context(product_context: dict | None) -> dict | None:
+    if not product_context:
+        return None
+    return {
+        "name": trim_text(product_context.get("name", ""), 120),
+        "price": trim_text(product_context.get("price", ""), 80),
+        "category": trim_text(product_context.get("category", ""), 80),
+        "color_options": [trim_text(x, 40) for x in (product_context.get("color_options") or [])[:10]],
+        "size_options": [trim_text(x, 40) for x in (product_context.get("size_options") or [])[:10]],
+        "detail_sections": {
+            "summary": trim_text((product_context.get("detail_sections") or {}).get("summary", ""), 900),
+            "material": trim_text((product_context.get("detail_sections") or {}).get("material", ""), 260),
+            "fit": trim_text((product_context.get("detail_sections") or {}).get("fit", ""), 260),
+            "size_tip": trim_text((product_context.get("detail_sections") or {}).get("size_tip", ""), 260),
+            "shipping": trim_text((product_context.get("detail_sections") or {}).get("shipping", ""), 220),
+        }
+    }
+
+
+def slim_db_product(db_product: dict | None) -> dict | None:
+    if not db_product:
+        return None
+    keep_keys = [
+        "product_no", "product_name", "category", "price", "size_info",
+        "fit_summary", "fabric", "color", "color_options", "top_size_range",
+        "bottom_size_range", "body_cover_features", "styling_keywords", "season"
+    ]
+    slim = {}
+    for key in keep_keys:
+        if key in db_product and db_product.get(key):
+            slim[key] = trim_text(db_product.get(key, ""), 220)
+    return slim
+
+
+def safe_llm_fallback(user_text: str) -> str:
+    text = clean_text(user_text)
+    if is_recommendation_question(text):
+        return "지금 문의가 잠시 몰려서 추천 답변이 바로 안 붙고 있어요. 잠깐 뒤 다시 한번만 보내주시면, 실제 등록된 상품 기준으로 바로 골라드릴게요 :)"
+    if is_color_question(text):
+        return "지금 문의가 잠시 몰려서 답변 연결이 늦어지고 있어요. 컬러는 옵션창에 보이는 기준으로 먼저 봐주시면 되고, 잠깐 뒤 다시 보내주시면 더 정확히 같이 봐드릴게요 :)"
+    if any(k in text for k in ["배송", "출고", "언제 와", "교환", "반품"]):
+        return "지금 문의가 잠시 몰린 상태예요. 배송은 오후 2시 이전 주문이면 당일 출고, 일반적으로는 결제 후 2~4영업일 정도로 봐주시면 돼요. 교환/반품은 수령 후 7일 이내 접수 가능해요 :)"
+    return "지금 문의가 잠시 몰려서 답변 연결이 늦어지고 있어요. 같은 내용을 잠깐 뒤 한 번만 다시 보내주시면 바로 이어서 도와드릴게요 :)"
+
 def build_color_guard_answer(user_text: str, product_context: dict | None, db_product: dict | None):
     if not is_color_question(user_text):
         return None
@@ -861,11 +915,11 @@ def get_llm_answer(user_text: str, current_url: str, product_no_value: str, prod
             "product_no": product_no_value
         },
         "body_context": body_context,
-        "product_context": product_context,
-        "db_product": db_product,
-        "confirmed_colors": confirmed_colors,
-        "alternative_products": alt_products,
-        "recommendation_candidates": reco_candidates,
+        "product_context": slim_product_context(product_context),
+        "db_product": slim_db_product(db_product),
+        "confirmed_colors": confirmed_colors[:10],
+        "alternative_products": alt_products[:3],
+        "recommendation_candidates": reco_candidates[:3],
     }
 
     messages = [
@@ -873,19 +927,35 @@ def get_llm_answer(user_text: str, current_url: str, product_no_value: str, prod
         {"role": "system", "content": "참고 데이터(JSON):\n" + json.dumps(context_pack, ensure_ascii=False)},
     ]
 
-    history = st.session_state.messages[-8:]
+    history = st.session_state.messages[-6:]
     for m in history:
-        messages.append({"role": m["role"], "content": m["content"]})
+        messages.append({"role": m["role"], "content": trim_text(m["content"], 500)})
 
-    messages.append({"role": "user", "content": user_text})
+    messages.append({"role": "user", "content": trim_text(user_text, 500)})
 
-    resp = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=messages,
-        temperature=0.55,
-        max_tokens=420
-    )
-    return resp.choices[0].message.content.strip()
+    last_error = None
+    for wait_seconds in (0, 1.2, 2.5):
+        if wait_seconds:
+            time.sleep(wait_seconds)
+        try:
+            resp = client.chat.completions.create(
+                model="gpt-4.1-mini",
+                messages=messages,
+                temperature=0.45,
+                max_tokens=320
+            )
+            content = (resp.choices[0].message.content or "").strip()
+            if content:
+                return content
+        except (RateLimitError, APITimeoutError, APIError) as e:
+            last_error = e
+            continue
+        except Exception as e:
+            last_error = e
+            break
+
+    print(f"[MIYA LLM ERROR] {type(last_error).__name__}: {last_error}")
+    return safe_llm_fallback(user_text)
 
 
 def process_user_message(user_text: str, current_url: str, product_no_value: str, product_context: dict | None, db_product: dict | None):
