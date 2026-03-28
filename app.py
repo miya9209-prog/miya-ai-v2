@@ -22,7 +22,7 @@ if not OPENAI_API_KEY:
     st.error("OPENAI_API_KEY가 필요합니다. Streamlit Secrets에 OPENAI_API_KEY를 추가해주세요.")
     st.stop()
 
-client = OpenAI(api_key=OPENAI_API_KEY, timeout=25.0, max_retries=1)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 POLICY_DB = {
     "shipping": {
@@ -920,43 +920,53 @@ def slim_db_product(db_product: dict | None) -> dict | None:
     return slim
 
 
-def build_generic_product_fallback(product_context: dict | None, db_product: dict | None):
-    product_name = clean_text((db_product or {}).get("product_name", "")) or clean_text((product_context or {}).get("product_name", "")) or clean_text((product_context or {}).get("name", "")) or "지금 보시는 상품"
-    summary = clean_text((product_context or {}).get("summary", "")) or clean_text(((product_context or {}).get("detail_sections") or {}).get("summary", ""))
-    fit = clean_text((product_context or {}).get("fit", "")) or clean_text(((product_context or {}).get("detail_sections") or {}).get("fit", ""))
-    material = clean_text((product_context or {}).get("material", "")) or clean_text(((product_context or {}).get("detail_sections") or {}).get("material", ""))
+def build_size_fallback_answer(user_text: str, product_context: dict | None, db_product: dict | None):
+    if not is_size_question(user_text):
+        return None
 
-    lines = [f"우선 {product_name} 기준으로 짧게 먼저 봐드릴게요 :)"]
-    if summary:
-        lines.append(trim_text(summary, 130))
-    if fit:
-        lines.append(f"핏은 {trim_text(fit, 90)} 쪽으로 보시면 좋아요.")
-    elif material:
-        lines.append(f"원단은 {trim_text(material, 90)} 쪽 느낌으로 보시면 돼요.")
-    lines.append("원하시면 제가 사이즈, 코디, 배송 중 한 가지로 바로 더 정확하게 이어서 봐드릴게요.")
-    return "\n".join(lines)
+    body = build_body_context()
+    user_top = clean_text(body.get("top_size", ""))
+    if not user_top:
+        return None
+
+    current_name = clean_text((db_product or {}).get("product_name", "")) or clean_text((product_context or {}).get("product_name", "")) or "지금 보시는 상품"
+    size_bits = [
+        clean_text((db_product or {}).get("top_size_range", "")),
+        clean_text((db_product or {}).get("size_info", "")),
+        clean_text((db_product or {}).get("fit_summary", "")),
+        clean_text(((product_context or {}).get("detail_sections") or {}).get("size_tip", "")),
+        clean_text(((product_context or {}).get("detail_sections") or {}).get("fit", "")),
+    ]
+    size_blob = " ".join([x for x in size_bits if x])
+
+    if any(k in size_blob for k in [f"{user_top}까지", f"{user_top} 가능", f"{user_top} 추천", f"FREE~{user_top}"]):
+        return (
+            f"현재 입력 기준으로는 고객님 상의 {user_top} 기준에도 {current_name} 먼저 보실 만해요 :)\n"
+            f"지금 확인되는 사이즈 안내상 {user_top} 고객님도 무리 없이 볼 수 있는 쪽으로 읽혀요.\n"
+            f"다만 원하시는 핏이 딱 맞는 느낌인지, 여유 있게 입는 느낌인지에 따라 체감은 조금 달라질 수 있어요."
+        )
+
+    if "FREE" in size_blob or "프리" in size_blob:
+        return (
+            f"현재 입력 기준으로는 {current_name}를 프리사이즈 상의로 먼저 보시면 좋아요 :)\n"
+            f"고객님 상의 {user_top} 기준에서는 너무 타이트한 느낌보다는 편하게 맞는지 실측과 사이즈 TIP을 한 번 더 같이 보는 쪽이 가장 안전해요."
+        )
+
+    return (
+        f"현재 입력 기준으로는 {current_name}를 고객님 상의 {user_top} 기준으로 먼저 확인해보시면 좋아요 :)\n"
+        f"지금은 문의가 잠시 몰려 있어 실시간 답변이 조금 지연되지만, 사이즈표와 실측 기준으로 한 번 더 같이 보면 더 정확하게 이어서 도와드릴 수 있어요."
+    )
 
 
-def safe_llm_fallback(user_text: str, product_context: dict | None = None, db_product: dict | None = None) -> str:
+def safe_llm_fallback(user_text: str) -> str:
     text = clean_text(user_text)
-
-    fast = get_fast_policy_answer(text)
-    if fast:
-        return fast
-
-    size_guard = build_size_guard_answer(text, product_context, db_product)
-    if size_guard:
-        return size_guard
-
-    rec_guard = build_recommendation_answer(text, product_context, db_product)
-    if rec_guard:
-        return rec_guard
-
-    color_guard = build_color_guard_answer(text, product_context, db_product)
-    if color_guard:
-        return color_guard
-
-    return build_generic_product_fallback(product_context, db_product)
+    if is_recommendation_question(text):
+        return "지금 문의가 잠시 몰려서 추천 답변이 바로 안 붙고 있어요. 잠깐 뒤 다시 한번만 보내주시면, 실제 등록된 상품 기준으로 바로 골라드릴게요 :)"
+    if is_color_question(text):
+        return "지금 문의가 잠시 몰려서 답변 연결이 늦어지고 있어요. 컬러는 옵션창에 보이는 기준으로 먼저 봐주시면 되고, 잠깐 뒤 다시 보내주시면 더 정확히 같이 봐드릴게요 :)"
+    if any(k in text for k in ["배송", "출고", "언제 와", "교환", "반품"]):
+        return "지금 문의가 잠시 몰린 상태예요. 배송은 오후 2시 이전 주문이면 당일 출고, 일반적으로는 결제 후 2~4영업일 정도로 봐주시면 돼요. 교환/반품은 수령 후 7일 이내 접수 가능해요 :)"
+    return "지금 문의가 잠시 몰려서 답변 연결이 늦어지고 있어요. 같은 내용을 잠깐 뒤 한 번만 다시 보내주시면 바로 이어서 도와드릴게요 :)"
 
 def build_color_guard_answer(user_text: str, product_context: dict | None, db_product: dict | None):
     if not is_color_question(user_text):
@@ -1027,55 +1037,30 @@ def get_llm_answer(user_text: str, current_url: str, product_no_value: str, prod
 
 
 def process_user_message(user_text: str, current_url: str, product_no_value: str, product_context: dict | None, db_product: dict | None):
-    cleaned = clean_text(user_text)
-    if not cleaned:
+    st.session_state.messages.append({"role": "user", "content": user_text})
+
+    fast = get_fast_policy_answer(user_text)
+    if fast:
+        st.session_state.messages.append({"role": "assistant", "content": fast})
         return
 
-    if is_duplicate_question(cleaned):
-        last_answer = st.session_state.get("last_answer", "")
-        if last_answer:
-            st.session_state.messages.append({"role": "user", "content": cleaned})
-            st.session_state.messages.append({"role": "assistant", "content": last_answer})
+    size_guard = build_size_guard_answer(user_text, product_context, db_product)
+    if size_guard:
+        st.session_state.messages.append({"role": "assistant", "content": size_guard})
         return
 
-    if not acquire_processing_lock():
-        busy_answer = st.session_state.get("last_answer") or "제가 바로 이어서 보고 있어서요 :) 잠깐만 기다려주시면 바로 답변드릴게요."
-        st.session_state.messages.append({"role": "user", "content": cleaned})
-        st.session_state.messages.append({"role": "assistant", "content": busy_answer})
+    rec_guard = build_recommendation_answer(user_text, product_context, db_product)
+    if rec_guard:
+        st.session_state.messages.append({"role": "assistant", "content": rec_guard})
         return
 
-    st.session_state.messages.append({"role": "user", "content": cleaned})
+    color_guard = build_color_guard_answer(user_text, product_context, db_product)
+    if color_guard and ("무슨" in user_text or "어떤" in user_text or "컬러" in user_text or "색상" in user_text):
+        st.session_state.messages.append({"role": "assistant", "content": color_guard})
+        return
 
-    try:
-        fast = get_fast_policy_answer(cleaned)
-        if fast:
-            st.session_state.messages.append({"role": "assistant", "content": fast})
-            st.session_state.last_answer = fast
-            return
-
-        size_guard = build_size_guard_answer(cleaned, product_context, db_product)
-        if size_guard:
-            st.session_state.messages.append({"role": "assistant", "content": size_guard})
-            st.session_state.last_answer = size_guard
-            return
-
-        rec_guard = build_recommendation_answer(cleaned, product_context, db_product)
-        if rec_guard:
-            st.session_state.messages.append({"role": "assistant", "content": rec_guard})
-            st.session_state.last_answer = rec_guard
-            return
-
-        color_guard = build_color_guard_answer(cleaned, product_context, db_product)
-        if color_guard and ("무슨" in cleaned or "어떤" in cleaned or "컬러" in cleaned or "색상" in cleaned):
-            st.session_state.messages.append({"role": "assistant", "content": color_guard})
-            st.session_state.last_answer = color_guard
-            return
-
-        answer = get_llm_answer(cleaned, current_url, product_no_value, product_context, db_product)
-        st.session_state.messages.append({"role": "assistant", "content": answer})
-        st.session_state.last_answer = answer
-    finally:
-        release_processing_lock()
+    answer = get_llm_answer(user_text, current_url, product_no_value, product_context, db_product)
+    st.session_state.messages.append({"role": "assistant", "content": answer})
 
 
 product_context = fetch_product_context_cached(current_url, product_name_q) if current_url else None
