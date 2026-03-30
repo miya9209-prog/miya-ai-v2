@@ -393,28 +393,49 @@ def parse_page_size_options(product_context: Dict, db_product: Optional[Dict]) -
     text = " ".join([
         clean_text((product_context or {}).get("size_tip", "")),
         clean_text((product_context or {}).get("summary", "")),
+        clean_text((product_context or {}).get("raw_excerpt", ""))[:800],
         clean_text((db_product or {}).get("size_range", "")),
     ])
     options: List[Dict] = []
     seen = set()
+
+    def add_option(label: str, size_desc: str):
+        ranks = expand_size_text(size_desc)
+        if not ranks:
+            return
+        safe_label = clean_text(label).upper() or "FREE"
+        if safe_label in {"COLOR", "SIZE", "OPTION", "옵션", "컬러"}:
+            safe_label = "FREE"
+        key = (safe_label, tuple(ranks))
+        if key in seen:
+            return
+        seen.add(key)
+        options.append({"label": safe_label, "size_desc": size_desc, "ranks": ranks})
+
+    # 1) 옵션형 표기: FREE(55-77), M(55), L(66-77)
     for pat in [
-        r"([A-Za-z가-힣]+)\s*\((44|55반|55|66반|66|77반|77|88|99)\s*-\s*(44|55반|55|66반|66|77반|77|88|99)\)",
+        r"([A-Za-z가-힣]+)\s*\((44|55반|55|66반|66|77반|77|88|99)\s*[-~]\s*(44|55반|55|66반|66|77반|77|88|99)\)",
         r"([A-Za-z가-힣]+)\s*\((44|55반|55|66반|66|77반|77|88|99)\)",
     ]:
         for match in re.finditer(pat, text):
-            label = clean_text(match.group(1)).upper()
-            if label in {"COLOR", "SIZE", "OPTION", "옵션", "컬러"}:
-                continue
             if len(match.groups()) == 3:
-                size_desc = f"{match.group(2)}-{match.group(3)}"
+                add_option(match.group(1), f"{match.group(2)}-{match.group(3)}")
             else:
-                size_desc = match.group(2)
-            ranks = expand_size_text(size_desc)
-            if ranks:
-                key = (label, tuple(ranks))
-                if key not in seen:
-                    seen.add(key)
-                    options.append({"label": label, "size_desc": size_desc, "ranks": ranks})
+                add_option(match.group(1), match.group(2))
+
+    # 2) 문장형 표기: 사이즈 TIP 55~77 / 55-77 체형 / 77까지 가능
+    sentence_candidates = [clean_text((product_context or {}).get("size_tip", "")), clean_text((db_product or {}).get("size_range", "")), text]
+    for source in sentence_candidates:
+        if not source:
+            continue
+        for a, b in re.findall(r"(44|55반|55|66반|66|77반|77|88|99)\s*[-~]\s*(44|55반|55|66반|66|77반|77|88|99)", source):
+            add_option("FREE", f"{a}-{b}")
+        for token in re.findall(r"(44|55반|55|66반|66|77반|77|88|99)\s*까지", source):
+            add_option("FREE", f"55-{token}")
+        # FREE / 프리 표기만 따로 있을 때
+        if ("free" in source.lower() or "프리" in source) and not options:
+            add_option("FREE", "55-77")
+
     return options
 
 def parse_float_value(value) -> Optional[float]:
@@ -760,7 +781,11 @@ def build_name_answer(product_context: Dict, db_product: Optional[Dict]) -> Opti
     name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", ""))
     if not name or name == "지금 보시는 상품":
         return None
-    return f"지금 보시는 상품은 {name}이에요 :)"
+    return (
+        f"지금 보시는 상품은 {name}이에요 :)
+"
+        "궁금하신 부분 있으면 지금 상품 기준으로 바로 이어서 같이 봐드릴게요."
+    )
 
 
 def build_color_answer(product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
