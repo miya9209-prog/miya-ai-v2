@@ -10,12 +10,17 @@ import pandas as pd
 import requests
 import streamlit as st
 
-
-# ===== v2.2 FOLLOW-UP CONTEXT =====
+# ===== v2.3 RECOMMENDATION CONTEXT (OBJECT BASED) =====
 def save_recommendations(recos):
     try:
         import streamlit as st
-        st.session_state["last_recommendations"] = recos
+        structured = []
+        for i, r in enumerate(recos):
+            structured.append({
+                "index": i+1,
+                "name": str(r),
+            })
+        st.session_state["last_recommendations"] = structured
     except:
         pass
 
@@ -25,18 +30,22 @@ def get_followup_product(user_text):
         recos = st.session_state.get("last_recommendations", [])
         if not recos:
             return None
-        if "1번" in user_text:
+
+        # 번호 기반
+        if "1번" in user_text and len(recos) >= 1:
             return recos[0]
-        if "2번" in user_text and len(recos) > 1:
+        if "2번" in user_text and len(recos) >= 2:
             return recos[1]
-        if "3번" in user_text and len(recos) > 2:
+        if "3번" in user_text and len(recos) >= 3:
             return recos[2]
-        if any(k in user_text for k in ["그거","추천","방금"]):
+
+        # 지시어 기반
+        if any(k in user_text for k in ["그거","추천","방금","첫 번째"]):
             return recos[0]
     except:
         return None
     return None
-# ==================================
+# =====================================================
 
 from bs4 import BeautifulSoup
 from openai import OpenAI, RateLimitError, APIError, APITimeoutError
