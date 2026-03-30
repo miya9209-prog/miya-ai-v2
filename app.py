@@ -397,26 +397,39 @@ def parse_page_size_options(product_context: Dict, db_product: Optional[Dict]) -
     ])
     options: List[Dict] = []
     seen = set()
+
+    def add_option(label: str, size_desc: str) -> None:
+        ranks = expand_size_text(size_desc)
+        if not ranks:
+            return
+        norm_label = clean_text(label).upper() if label else "FREE"
+        if norm_label in {"COLOR", "SIZE", "OPTION", "옵션", "컬러"}:
+            norm_label = "FREE"
+        key = (norm_label, tuple(ranks))
+        if key not in seen:
+            seen.add(key)
+            options.append({"label": norm_label, "size_desc": size_desc, "ranks": ranks})
+
+    # structured options like FREE(55-77), M(55), L(66-77)
     for pat in [
-        r"([A-Za-z가-힣]+)\s*\((44|55반|55|66반|66|77반|77|88|99)\s*-\s*(44|55반|55|66반|66|77반|77|88|99)\)",
+        r"([A-Za-z가-힣]+)\s*\((44|55반|55|66반|66|77반|77|88|99)\s*[-~]\s*(44|55반|55|66반|66|77반|77|88|99)\)",
         r"([A-Za-z가-힣]+)\s*\((44|55반|55|66반|66|77반|77|88|99)\)",
     ]:
         for match in re.finditer(pat, text):
-            label = clean_text(match.group(1)).upper()
-            if label in {"COLOR", "SIZE", "OPTION", "옵션", "컬러"}:
-                continue
             if len(match.groups()) == 3:
-                size_desc = f"{match.group(2)}-{match.group(3)}"
+                add_option(match.group(1), f"{match.group(2)}-{match.group(3)}")
             else:
-                size_desc = match.group(2)
-            ranks = expand_size_text(size_desc)
-            if ranks:
-                key = (label, tuple(ranks))
-                if key not in seen:
-                    seen.add(key)
-                    options.append({"label": label, "size_desc": size_desc, "ranks": ranks})
-    return options
+                add_option(match.group(1), match.group(2))
 
+    # plain ranges in text like '사이즈 TIP : 55~77', '55-77까지', '55~77체형'
+    for a, b in re.findall(r"(44|55반|55|66반|66|77반|77|88|99)\s*[-~]\s*(44|55반|55|66반|66|77반|77|88|99)", text):
+        add_option("FREE", f"{a}-{b}")
+
+    # plain maximum only like '77까지'
+    for m in re.finditer(r"(44|55반|55|66반|66|77반|77|88|99)\s*까지", text):
+        add_option("FREE", m.group(1))
+
+    return options
 def parse_float_value(value) -> Optional[float]:
     text = clean_text(value).replace(",", "")
     if not text:
