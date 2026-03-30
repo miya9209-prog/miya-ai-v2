@@ -5,6 +5,7 @@ import html
 import time
 from typing import Optional, Dict, List, Tuple
 from urllib.parse import urlparse, parse_qs
+from datetime import datetime
 
 import pandas as pd
 import requests
@@ -130,6 +131,10 @@ def ensure_state() -> None:
         "last_user_hash": "",
         "last_user_ts": 0.0,
         "last_answer": "",
+        "session_id": "",
+        "_miya_last_llm_error": "",
+        "_miya_last_llm_error_text": "",
+        "_miya_last_llm_latency": 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -137,6 +142,36 @@ def ensure_state() -> None:
 
 
 ensure_state()
+if not st.session_state.session_id:
+    st.session_state.session_id = str(int(time.time() * 1000))
+
+
+def log_event(event_type: str, data: Optional[Dict] = None) -> None:
+    data = data or {}
+    try:
+        now = datetime.now()
+        os.makedirs("logs", exist_ok=True)
+        filename = os.path.join("logs", f"miya_log_{now.strftime('%Y-%m')}.csv")
+        row = {
+            "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "event_type": event_type,
+            "session_id": clean_text(st.session_state.get("session_id", "")),
+            "product_no": clean_text(data.get("product_no", "") or st.session_state.get("current_product_no", "")),
+            "product_name": clean_text(data.get("product_name", "") or st.session_state.get("current_product_name", "")),
+            "user_text": clean_text(data.get("user_text", "")),
+            "response_mode": clean_text(data.get("response_mode", "")),
+            "fallback_reason": clean_text(data.get("fallback_reason", "")),
+            "is_fallback": bool(data.get("is_fallback", False)),
+            "error_text": clean_text(data.get("error_text", "")),
+            "latency_ms": int(data.get("latency_ms", 0) or 0),
+        }
+        df = pd.DataFrame([row])
+        if os.path.exists(filename):
+            df.to_csv(filename, mode="a", header=False, index=False, encoding="utf-8-sig")
+        else:
+            df.to_csv(filename, index=False, encoding="utf-8-sig")
+    except Exception:
+        pass
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -889,12 +924,16 @@ def call_llm(user_text: str, product_context: Dict, db_product: Optional[Dict]) 
     pack = slim_current_context(product_context, db_product, user_text)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": "참고 데이터(JSON):\n" + json.dumps(pack, ensure_ascii=False)},
+        {"role": "system", "content": "참고 데이터(JSON):\\n" + json.dumps(pack, ensure_ascii=False)},
     ]
     for m in st.session_state.messages[-4:]:
         messages.append({"role": m["role"], "content": trim_text(m["content"], 300)})
     messages.append({"role": "user", "content": trim_text(user_text, 350)})
+    st.session_state._miya_last_llm_error = ""
+    st.session_state._miya_last_llm_error_text = ""
+    st.session_state._miya_last_llm_latency = 0
     last_error = None
+    started = time.time()
     for wait in (0, 1.2):
         if wait:
             time.sleep(wait)
@@ -908,6 +947,7 @@ def call_llm(user_text: str, product_context: Dict, db_product: Optional[Dict]) 
             content = clean_text(resp.choices[0].message.content or "")
             if not content:
                 continue
+            st.session_state._miya_last_llm_latency = int((time.time() - started) * 1000)
             return content
         except (RateLimitError, APITimeoutError, APIError) as e:
             last_error = e
@@ -915,6 +955,9 @@ def call_llm(user_text: str, product_context: Dict, db_product: Optional[Dict]) 
         except Exception as e:
             last_error = e
             break
+    st.session_state._miya_last_llm_error = type(last_error).__name__ if last_error else "llm_error"
+    st.session_state._miya_last_llm_error_text = clean_text(str(last_error)) if last_error else ""
+    st.session_state._miya_last_llm_latency = int((time.time() - started) * 1000)
     print(f"[MIYA LLM ERROR] {type(last_error).__name__}: {last_error}")
     return None
 
@@ -946,22 +989,59 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
     st.session_state.last_user_ts = now
     st.session_state.is_processing = True
     st.session_state.messages.append({"role": "user", "content": user_text})
+    log_event("user_message", {"user_text": user_text})
     try:
         # deterministic answers first
         direct_answers = [
-            build_name_answer(product_context, db_product) if is_name_question(user_text) else None,
-            get_fast_policy_answer(user_text),
-            build_size_answer(user_text, product_context, db_product),
-            build_recommendation_answer(user_text, product_context, db_product),
-            build_color_answer(product_context, db_product) if is_color_question(user_text) else None,
+            ("name", build_name_answer(product_context, db_product) if is_name_question(user_text) else None),
+            ("policy", get_fast_policy_answer(user_text)),
+            ("size", build_size_answer(user_text, product_context, db_product)),
+            ("recommendation", build_recommendation_answer(user_text, product_context, db_product)),
+            ("color", build_color_answer(product_context, db_product) if is_color_question(user_text) else None),
         ]
-        answer = next((a for a in direct_answers if a), None)
+        answer = None
+        response_mode = ""
+        for mode, candidate in direct_answers:
+            if candidate:
+                answer = candidate
+                response_mode = mode
+                break
         if not answer and llm_can_help(user_text):
             answer = call_llm(user_text, product_context, db_product)
+            if answer:
+                response_mode = "llm"
         if not answer:
+            fallback_reason = clean_text(st.session_state.get("_miya_last_llm_error", "")) or "safe_llm_fallback"
+            error_text = clean_text(st.session_state.get("_miya_last_llm_error_text", ""))
             answer = safe_llm_fallback(user_text, product_context, db_product)
+            response_mode = "fallback"
+            log_event("fallback", {
+                "user_text": user_text,
+                "response_mode": response_mode,
+                "fallback_reason": fallback_reason,
+                "is_fallback": True,
+                "error_text": error_text,
+                "latency_ms": st.session_state.get("_miya_last_llm_latency", 0),
+            })
+            if error_text:
+                log_event("error", {
+                    "user_text": user_text,
+                    "response_mode": response_mode,
+                    "fallback_reason": fallback_reason,
+                    "is_fallback": True,
+                    "error_text": error_text,
+                    "latency_ms": st.session_state.get("_miya_last_llm_latency", 0),
+                })
         st.session_state.last_answer = answer
         st.session_state.messages.append({"role": "assistant", "content": answer})
+        log_event("assistant_response", {
+            "user_text": user_text,
+            "response_mode": response_mode or "assistant",
+            "fallback_reason": clean_text(st.session_state.get("_miya_last_llm_error", "")) if response_mode == "fallback" else "",
+            "is_fallback": response_mode == "fallback",
+            "error_text": clean_text(st.session_state.get("_miya_last_llm_error_text", "")) if response_mode == "fallback" else "",
+            "latency_ms": st.session_state.get("_miya_last_llm_latency", 0) if response_mode in ["llm", "fallback"] else 0,
+        })
     finally:
         st.session_state.is_processing = False
 
@@ -994,6 +1074,9 @@ product_context = fetch_product_context(current_url, product_name_q, product_no)
 db_product = get_db_product(product_no)
 if db_product and clean_text(db_product.get("product_name", "")):
     product_context["product_name"] = clean_text(db_product.get("product_name", ""))
+
+st.session_state.current_product_no = clean_text(product_context.get("product_no", ""))
+st.session_state.current_product_name = clean_text(product_context.get("product_name", ""))
 
 # ---------- UI ----------
 st.markdown("""
