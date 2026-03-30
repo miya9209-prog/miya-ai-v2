@@ -1073,13 +1073,13 @@ if not st.session_state.messages:
     is_detail_page = ("/product/detail" in current_url_lower) or ("product_no=" in current_url_lower) or bool(product_no)
     if is_detail_page:
         welcome = (
-            "안녕하세요? 옷 같이 봐드리는 미야언니예요 :)\n"
+            "안녕하세요? 옷 같이 봐드리는 미야언니예요 :) [TEST-331]\n"
             "'지금 보시는 상품' 기준으로 제가 같이 봐드릴게요.\n"
             "사이즈, 코디, 배송, 교환 중 뭐부터 이야기해볼까요?"
         )
     else:
         welcome = (
-            "안녕하세요? 옷 같이 봐드리는 미야언니예요 :)\n"
+            "안녕하세요? 옷 같이 봐드리는 미야언니예요 :) [TEST-331] :)\n"
             "지금은 일반 상담 모드예요.\n"
             "상품 상세페이지에서 채팅창을 열면 그 상품 기준으로 더 정확하게 상담해드릴 수 있어요 :)"
         )
