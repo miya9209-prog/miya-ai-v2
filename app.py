@@ -397,20 +397,8 @@ def parse_page_size_options(product_context: Dict, db_product: Optional[Dict]) -
     ])
     options: List[Dict] = []
     seen = set()
-
-    def add_option(label: str, size_desc: str) -> None:
-        ranks = expand_size_text(size_desc)
-        if not ranks:
-            return
-        key = (label, tuple(ranks))
-        if key in seen:
-            return
-        seen.add(key)
-        options.append({"label": label, "size_desc": size_desc, "ranks": ranks})
-
-    # 1) explicit option patterns: FREE(55-77), M(55), L(66-77)
     for pat in [
-        r"([A-Za-z가-힣]+)\s*\((44|55반|55|66반|66|77반|77|88|99)\s*[-~]\s*(44|55반|55|66반|66|77반|77|88|99)\)",
+        r"([A-Za-z가-힣]+)\s*\((44|55반|55|66반|66|77반|77|88|99)\s*-\s*(44|55반|55|66반|66|77반|77|88|99)\)",
         r"([A-Za-z가-힣]+)\s*\((44|55반|55|66반|66|77반|77|88|99)\)",
     ]:
         for match in re.finditer(pat, text):
@@ -421,21 +409,12 @@ def parse_page_size_options(product_context: Dict, db_product: Optional[Dict]) -
                 size_desc = f"{match.group(2)}-{match.group(3)}"
             else:
                 size_desc = match.group(2)
-            add_option(label, size_desc)
-
-    # 2) general size-tip patterns: "사이즈 TIP : 55~77", "55-77 체형", "77까지"
-    generic_patterns = [
-        r"(44|55반|55|66반|66|77반|77|88|99)\s*[-~]\s*(44|55반|55|66반|66|77반|77|88|99)",
-        r"(44|55반|55|66반|66|77반|77|88|99)\s*까지",
-    ]
-    for pat in generic_patterns:
-        for match in re.finditer(pat, text):
-            if len(match.groups()) == 2 and match.group(2):
-                size_desc = f"{match.group(1)}-{match.group(2)}"
-            else:
-                size_desc = f"{match.group(1)}까지"
-            add_option("FREE", size_desc)
-
+            ranks = expand_size_text(size_desc)
+            if ranks:
+                key = (label, tuple(ranks))
+                if key not in seen:
+                    seen.add(key)
+                    options.append({"label": label, "size_desc": size_desc, "ranks": ranks})
     return options
 
 def parse_float_value(value) -> Optional[float]:
