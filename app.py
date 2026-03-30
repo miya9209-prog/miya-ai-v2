@@ -9,6 +9,35 @@ from urllib.parse import urlparse, parse_qs
 import pandas as pd
 import requests
 import streamlit as st
+
+
+# ===== v2.2 FOLLOW-UP CONTEXT =====
+def save_recommendations(recos):
+    try:
+        import streamlit as st
+        st.session_state["last_recommendations"] = recos
+    except:
+        pass
+
+def get_followup_product(user_text):
+    try:
+        import streamlit as st
+        recos = st.session_state.get("last_recommendations", [])
+        if not recos:
+            return None
+        if "1번" in user_text:
+            return recos[0]
+        if "2번" in user_text and len(recos) > 1:
+            return recos[1]
+        if "3번" in user_text and len(recos) > 2:
+            return recos[2]
+        if any(k in user_text for k in ["그거","추천","방금"]):
+            return recos[0]
+    except:
+        return None
+    return None
+# ==================================
+
 from bs4 import BeautifulSoup
 from openai import OpenAI, RateLimitError, APIError, APITimeoutError
 
@@ -130,8 +159,6 @@ def ensure_state() -> None:
         "last_user_hash": "",
         "last_user_ts": 0.0,
         "last_answer": "",
-        "last_answer_mode": "",
-        "last_recommended": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -646,52 +673,6 @@ def infer_target_category_from_query(user_text: str, current_product: Dict) -> s
     return ""
 
 
-
-
-def recommendation_followup_target(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Tuple[Dict, Optional[Dict]]:
-    """
-    If the last assistant turn recommended products and the user asks a follow-up
-    size/fit question, treat the first recommended product as the active product.
-    """
-    recos = st.session_state.get("last_recommended", []) or []
-    if not recos:
-        return product_context, db_product
-
-    q = clean_text(user_text)
-    q_nospace = q.replace(" ", "")
-    refers_reco = any(k in q_nospace for k in ["추천", "추천해준", "방금", "그거", "그상품", "그옷", "이추천", "추천상품"])
-    size_like = is_size_question(user_text)
-    fit_like = any(k in q_nospace for k in ["입을수", "맞을까", "맞아", "타이트", "여유", "핏"])
-    use_reco = refers_reco or (st.session_state.get("last_answer_mode") == "recommendation" and (size_like or fit_like))
-
-    if not use_reco:
-        return product_context, db_product
-
-    reco = recos[0]
-    proxy_ctx = {
-        "product_no": normalize_product_no(clean_text(reco.get("product_no", ""))),
-        "product_name": clean_text(reco.get("product_name", "")) or "추천드린 상품",
-        "category": clean_text(reco.get("category", "")),
-        "sub_category": clean_text(reco.get("sub_category", "")),
-        "summary": "",
-        "material": "",
-        "fit": "",
-        "size_tip": clean_text(reco.get("size_range", "")),
-        "raw_excerpt": clean_text(reco.get("size_range", "")),
-        "colors": [],
-    }
-    proxy_db = {
-        "product_no": normalize_product_no(clean_text(reco.get("product_no", ""))),
-        "product_name": clean_text(reco.get("product_name", "")),
-        "category": clean_text(reco.get("category", "")),
-        "sub_category": clean_text(reco.get("sub_category", "")),
-        "size_range": clean_text(reco.get("size_range", "")),
-        "style_tags": clean_text(reco.get("style_tags", "")) if isinstance(reco, dict) else "",
-        "body_cover_features": clean_text(reco.get("body_cover_features", "")) if isinstance(reco, dict) else "",
-        "fit_type": clean_text(reco.get("fit_type", "")) if isinstance(reco, dict) else "",
-    }
-    return proxy_ctx, proxy_db
-
 def build_product_reason(rowd: Dict, user_text: str) -> List[str]:
     reasons: List[str] = []
     blob = row_blob(rowd)
@@ -874,6 +855,7 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
     current_product = current_product_dict(product_context, db_product)
     body_ctx = build_body_context()
     recos = recommend_products_for_query(user_text, current_product, body_ctx, limit=3)
+    save_recommendations(recos)
     if not recos:
         return None
     opener = "네, 이 상품이랑 같이 입기 좋은 쪽으로 먼저 골라드릴게요."
@@ -889,7 +871,6 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
         lines.append(line.strip())
     if body_ctx.get("bottom_size") and target in ["팬츠", "스커트"]:
         lines.append(f"고객님 하의 {body_ctx.get('bottom_size')} 기준으로 너무 타이트해 보이는 쪽은 최대한 빼고 골라봤어요.")
-    st.session_state["last_recommended"] = recos
     return "\n".join(lines)
 
 
@@ -903,7 +884,8 @@ def slim_current_context(product_context: Dict, db_product: Optional[Dict], user
     colors = parse_color_options(product_context, db_product)
     body = build_body_context()
     size_eval = evaluate_size_support(clean_text(body.get("top_size", "")), product_context, db_product) if body.get("top_size") else {"supported": None, "reason": ""}
-    recos = recommend_products_for_query(user_text, current, body, limit=3) if is_recommendation_question(user_text) else []
+    recos = recommend_products_for_query(user_text, current, body, limit=3)
+    save_recommendations(recos) if is_recommendation_question(user_text) else []
     return {
         "current_product_name": current.get("product_name") or "지금 보시는 상품",
         "current_product_no": current.get("product_no", ""),
@@ -996,32 +978,20 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
     st.session_state.is_processing = True
     st.session_state.messages.append({"role": "user", "content": user_text})
     try:
-        active_context, active_db = recommendation_followup_target(user_text, product_context, db_product)
-
-        name_answer = build_name_answer(active_context, active_db) if is_name_question(user_text) else None
-        policy_answer = get_fast_policy_answer(user_text)
-        size_answer = build_size_answer(user_text, active_context, active_db)
-        reco_answer = build_recommendation_answer(user_text, product_context, db_product)
-        color_answer = build_color_answer(active_context, active_db) if is_color_question(user_text) else None
-
+        # deterministic answers first
         direct_answers = [
-            ("name", name_answer),
-            ("policy", policy_answer),
-            ("size", size_answer),
-            ("recommendation", reco_answer),
-            ("color", color_answer),
+            build_name_answer(product_context, db_product) if is_name_question(user_text) else None,
+            get_fast_policy_answer(user_text),
+            build_size_answer(user_text, product_context, db_product),
+            build_recommendation_answer(user_text, product_context, db_product),
+            build_color_answer(product_context, db_product) if is_color_question(user_text) else None,
         ]
-        selected_mode, answer = next(((mode, a) for mode, a in direct_answers if a), ("", None))
-
+        answer = next((a for a in direct_answers if a), None)
         if not answer and llm_can_help(user_text):
-            answer = call_llm(user_text, active_context, active_db)
-            selected_mode = "llm"
+            answer = call_llm(user_text, product_context, db_product)
         if not answer:
-            answer = safe_llm_fallback(user_text, active_context, active_db)
-            selected_mode = "fallback"
-
+            answer = safe_llm_fallback(user_text, product_context, db_product)
         st.session_state.last_answer = answer
-        st.session_state.last_answer_mode = selected_mode
         st.session_state.messages.append({"role": "assistant", "content": answer})
     finally:
         st.session_state.is_processing = False
@@ -1038,8 +1008,6 @@ context_key = f"{current_url}|{product_no}|{product_name_q}"
 if context_key != st.session_state.last_context_key:
     st.session_state.last_context_key = context_key
     st.session_state.messages = []
-    st.session_state.last_recommended = []
-    st.session_state.last_answer_mode = ""
     st.session_state.last_user_hash = ""
     st.session_state.last_answer = ""
 
