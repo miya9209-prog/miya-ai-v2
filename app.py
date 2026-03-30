@@ -9,6 +9,31 @@ import streamlit as st
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
+# ===== LOGGING =====
+import time
+def log_event(event_type, data):
+    try:
+        import pandas as pd, os
+        from datetime import datetime
+        now = datetime.now()
+        ym = now.strftime("%Y-%m")
+        os.makedirs("logs", exist_ok=True)
+        path = f"logs/miya_log_{ym}.csv"
+        row = {
+            "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "event_type": event_type,
+            "user_text": data.get("user_text",""),
+        }
+        df = pd.DataFrame([row])
+        if os.path.exists(path):
+            df.to_csv(path, mode="a", header=False, index=False, encoding="utf-8-sig")
+        else:
+            df.to_csv(path, index=False, encoding="utf-8-sig")
+    except:
+        pass
+# ===================
+
+
 st.set_page_config(
     page_title="미야언니",
     layout="centered",
