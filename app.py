@@ -9,44 +9,6 @@ from urllib.parse import urlparse, parse_qs
 import pandas as pd
 import requests
 import streamlit as st
-
-# ===== v2.3 RECOMMENDATION CONTEXT (OBJECT BASED) =====
-def save_recommendations(recos):
-    try:
-        import streamlit as st
-        structured = []
-        for i, r in enumerate(recos):
-            structured.append({
-                "index": i+1,
-                "name": str(r),
-            })
-        st.session_state["last_recommendations"] = structured
-    except:
-        pass
-
-def get_followup_product(user_text):
-    try:
-        import streamlit as st
-        recos = st.session_state.get("last_recommendations", [])
-        if not recos:
-            return None
-
-        # 번호 기반
-        if "1번" in user_text and len(recos) >= 1:
-            return recos[0]
-        if "2번" in user_text and len(recos) >= 2:
-            return recos[1]
-        if "3번" in user_text and len(recos) >= 3:
-            return recos[2]
-
-        # 지시어 기반
-        if any(k in user_text for k in ["그거","추천","방금","첫 번째"]):
-            return recos[0]
-    except:
-        return None
-    return None
-# =====================================================
-
 from bs4 import BeautifulSoup
 from openai import OpenAI, RateLimitError, APIError, APITimeoutError
 
@@ -168,6 +130,7 @@ def ensure_state() -> None:
         "last_user_hash": "",
         "last_user_ts": 0.0,
         "last_answer": "",
+        "last_recommendations": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -713,6 +676,150 @@ def build_product_reason(rowd: Dict, user_text: str) -> List[str]:
     return out[:2]
 
 
+
+
+def save_recommendations(recos: List[Dict]) -> None:
+    try:
+        cleaned: List[Dict] = []
+        for reco in recos:
+            rowd = reco.get("_full_row", {}) if isinstance(reco, dict) else {}
+            cleaned.append({
+                "product_name": clean_text(reco.get("product_name", "")),
+                "product_no": normalize_product_no(clean_text(rowd.get("product_no", "") or reco.get("product_no", ""))),
+                "category": clean_text(reco.get("category", "")),
+                "sub_category": clean_text(reco.get("sub_category", "")),
+                "size_range": clean_text(reco.get("size_range", "")),
+                "reasons": reco.get("reasons", [])[:2] if isinstance(reco, dict) else [],
+                "_full_row": rowd if isinstance(rowd, dict) else {},
+            })
+        st.session_state.last_recommendations = cleaned
+    except Exception:
+        st.session_state.last_recommendations = []
+
+def get_recommendation_reference_index(user_text: str) -> Optional[int]:
+    q = clean_text(user_text).replace(" ", "")
+    mapping = {
+        0: ["1번", "첫번째", "첫번째상품", "첫번째옷", "첫번째바지", "첫째"],
+        1: ["2번", "두번째", "두번째상품", "두번째옷", "두번째바지", "둘째"],
+        2: ["3번", "세번째", "세번째상품", "세번째옷", "세번째바지", "셋째"],
+    }
+    for idx, words in mapping.items():
+        if any(w in q for w in words):
+            return idx
+    if any(w in q for w in ["방금추천", "추천해준", "그거", "그상품", "그옷", "그바지"]):
+        return 0
+    return None
+
+def get_followup_recommendation(user_text: str) -> Optional[Dict]:
+    idx = get_recommendation_reference_index(user_text)
+    recos = st.session_state.get("last_recommendations", []) or []
+    if idx is None or idx >= len(recos):
+        return None
+    return recos[idx]
+
+def recommendation_to_context(reco: Dict) -> Tuple[Dict, Optional[Dict]]:
+    rowd = reco.get("_full_row", {}) if isinstance(reco, dict) else {}
+    db_like = rowd if rowd else {
+        "product_no": clean_text(reco.get("product_no", "")),
+        "product_name": clean_text(reco.get("product_name", "")),
+        "category": clean_text(reco.get("category", "")),
+        "sub_category": clean_text(reco.get("sub_category", "")),
+        "size_range": clean_text(reco.get("size_range", "")),
+    }
+    raw_blob = " ".join([
+        clean_text(db_like.get("product_name", "")),
+        clean_text(db_like.get("category", "")),
+        clean_text(db_like.get("sub_category", "")),
+        clean_text(db_like.get("fit_type", "")),
+        clean_text(db_like.get("body_cover_features", "")),
+        clean_text(db_like.get("style_tags", "")),
+        clean_text(db_like.get("coordination_items", "")),
+        clean_text(db_like.get("product_summary", "")),
+        clean_text(db_like.get("fabric", "")),
+        clean_text(db_like.get("size_range", "")),
+        clean_text(db_like.get("color_options", "")),
+    ])
+    context = {
+        "product_no": normalize_product_no(clean_text(db_like.get("product_no", ""))),
+        "product_name": clean_text(db_like.get("product_name", "") or reco.get("product_name", "") or "추천드린 상품"),
+        "category": clean_text(db_like.get("category", "") or reco.get("category", "") or "기타"),
+        "sub_category": clean_text(db_like.get("sub_category", "") or reco.get("sub_category", "")),
+        "summary": clean_text(db_like.get("product_summary", "")),
+        "material": clean_text(db_like.get("fabric", "")),
+        "fit": " / ".join([x for x in [clean_text(db_like.get("fit_type", "")), clean_text(db_like.get("body_cover_features", ""))] if x]),
+        "size_tip": clean_text(db_like.get("size_range", "") or reco.get("size_range", "")),
+        "raw_excerpt": raw_blob,
+        "colors": parse_color_options({"raw_excerpt": raw_blob}, db_like if db_like else None),
+    }
+    return context, db_like
+
+def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
+    reco = get_followup_recommendation(user_text)
+    if not reco:
+        return None
+    reco_context, reco_db = recommendation_to_context(reco)
+    idx = (get_recommendation_reference_index(user_text) or 0) + 1
+    q = clean_text(user_text)
+
+    if is_name_question(user_text) or any(k in q for k in ["어떤 옷", "어떤 바지", "어떤 상품", "설명", "알려줘", "뭐야"]):
+        reasons = [clean_text(x) for x in reco.get("reasons", []) if clean_text(x)]
+        reason_line = " ".join(reasons[:2]) if reasons else "지금 문의하신 자리랑 잘 어울리는 쪽으로 먼저 골라드린 상품이에요."
+        return (
+            f"{idx}번으로 추천드린 상품은 {reco_context['product_name']}이에요 :)\n"
+            f"{reason_line}\n"
+            "원하시면 이 상품 기준으로 사이즈감도 바로 이어서 봐드릴게요."
+        )
+
+    if is_size_question(user_text):
+        body = build_body_context()
+        user_top = clean_text(body.get("top_size", ""))
+        if not user_top:
+            return f"{idx}번으로 추천드린 {reco_context['product_name']} 기준으로 보려면 고객님 평소 상의 사이즈를 먼저 알려주세요 :)"
+        size_eval = evaluate_size_support(user_top, reco_context, reco_db)
+        matched = size_eval.get("matched_option")
+        reason = clean_text(size_eval.get("reason", ""))
+        name = reco_context["product_name"]
+        if size_eval["supported"] is False:
+            return (
+                f"{idx}번으로 추천드린 {name}은 고객님 상의 {user_top} 기준이면 넉넉하게 맞는 쪽으로 보긴 어려워요.\n"
+                f"{reason or '현재 확인되는 사이즈 범위가 고객님보다 작게 잡혀 있어요.'}\n"
+                "편하게 입는 기준이라면 강하게 추천드리긴 어렵고, 조금 더 여유 있는 쪽을 같이 보시는 게 안전해요."
+            )
+        if size_eval["supported"] == "edge":
+            label = matched["label"] if matched else "현재 옵션"
+            return (
+                f"{idx}번으로 추천드린 {name}은 고객님 상의 {user_top} 기준이면 가능권에는 들어오지만 경계선에 가까워요.\n"
+                f"{reason or (label + ' 기준으로 상단 사이즈에 가까워 보여요.')}\n"
+                "딱 맞는 느낌으로는 가능할 수 있지만, 여유 있게 입으실 거면 조금 더 편한 쪽이 나을 수 있어요."
+            )
+        if size_eval["supported"] is True:
+            if matched:
+                return (
+                    f"{idx}번으로 추천드린 {name}은 고객님 상의 {user_top} 기준이면 {matched['label']} 쪽으로 보시면 돼요 :)\n"
+                    f"{reason or '현재 확인되는 범위 안쪽으로 보여요.'}\n"
+                    "부담 없이 입는 쪽으로는 비교적 안정적인 편이에요."
+                )
+            return (
+                f"{idx}번으로 추천드린 {name}은 고객님 상의 {user_top} 기준으로 현재 확인되는 권장 범위 안에 있어요 :)\n"
+                f"{reason}\n"
+                "실측까지 같이 보면 더 정확하지만, 지금 기준으로는 무리 없는 편으로 보여요."
+            )
+        db_range = clean_text((reco_db or {}).get("size_range", ""))
+        if db_range:
+            return (
+                f"{idx}번으로 추천드린 {name}은 현재 {db_range} 쪽으로 먼저 안내되는 상품이에요 :)\n"
+                "지금 정보만으로 딱 잘라 말씀드리기보다는 실측을 같이 보면 더 정확해요."
+            )
+        return f"{idx}번으로 추천드린 {name}은 지금 보이는 정보만으로는 확답보다 실측을 같이 보는 쪽이 더 정확해요 :)"
+
+    if is_color_question(user_text):
+        ans = build_color_answer(reco_context, reco_db)
+        if ans:
+            return f"{idx}번으로 추천드린 {reco_context['product_name']} 기준으로 보면, {ans}"
+        return f"{idx}번으로 추천드린 {reco_context['product_name']}은 현재 컬러 정보가 또렷하게 확인되진 않아요."
+
+    return None
+
 def recommend_products_for_query(user_text: str, current_product: Dict, body_ctx: Dict[str, str], limit: int = 3) -> List[Dict]:
     if DB.empty:
         return []
@@ -864,9 +971,9 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
     current_product = current_product_dict(product_context, db_product)
     body_ctx = build_body_context()
     recos = recommend_products_for_query(user_text, current_product, body_ctx, limit=3)
-    save_recommendations(recos)
     if not recos:
         return None
+    save_recommendations(recos)
     opener = "네, 이 상품이랑 같이 입기 좋은 쪽으로 먼저 골라드릴게요."
     target = infer_target_category_from_query(user_text, current_product)
     if target == "팬츠":
@@ -893,8 +1000,7 @@ def slim_current_context(product_context: Dict, db_product: Optional[Dict], user
     colors = parse_color_options(product_context, db_product)
     body = build_body_context()
     size_eval = evaluate_size_support(clean_text(body.get("top_size", "")), product_context, db_product) if body.get("top_size") else {"supported": None, "reason": ""}
-    recos = recommend_products_for_query(user_text, current, body, limit=3)
-    save_recommendations(recos) if is_recommendation_question(user_text) else []
+    recos = recommend_products_for_query(user_text, current, body, limit=3) if is_recommendation_question(user_text) else []
     return {
         "current_product_name": current.get("product_name") or "지금 보시는 상품",
         "current_product_no": current.get("product_no", ""),
@@ -987,8 +1093,10 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
     st.session_state.is_processing = True
     st.session_state.messages.append({"role": "user", "content": user_text})
     try:
+        followup_answer = build_followup_recommendation_answer(user_text)
         # deterministic answers first
         direct_answers = [
+            followup_answer,
             build_name_answer(product_context, db_product) if is_name_question(user_text) else None,
             get_fast_policy_answer(user_text),
             build_size_answer(user_text, product_context, db_product),
@@ -1019,6 +1127,7 @@ if context_key != st.session_state.last_context_key:
     st.session_state.messages = []
     st.session_state.last_user_hash = ""
     st.session_state.last_answer = ""
+    st.session_state.last_recommendations = []
 
 product_context = fetch_product_context(current_url, product_name_q, product_no) if current_url else {
     "product_no": product_no,
