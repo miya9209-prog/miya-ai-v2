@@ -138,42 +138,7 @@ def ensure_state() -> None:
 
 
 ensure_state()
-
-def ensure_logs_dir() -> str:
-    log_dir = os.path.join(os.getcwd(), "logs")
-    os.makedirs(log_dir, exist_ok=True)
-    return log_dir
-
-
-def append_chat_log(event_type: str, user_text: str = "", response_text: str = "", response_mode: str = "",
-                    fallback_reason: str = "", is_fallback: bool = False, error_text: str = "",
-                    product_context: Optional[Dict] = None, started_at: Optional[float] = None) -> None:
-    try:
-        log_dir = ensure_logs_dir()
-        day = time.strftime("%Y%m%d")
-        path = os.path.join(log_dir, f"chat_log_{day}.csv")
-        row = {
-            "event_type": event_type,
-            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "session_id": st.session_state.get("last_context_key", ""),
-            "product_no": clean_text((product_context or {}).get("product_no", "")),
-            "product_name": clean_text((product_context or {}).get("product_name", "")),
-            "user_text": clean_text(user_text),
-            "response_mode": clean_text(response_mode),
-            "fallback_reason": clean_text(fallback_reason),
-            "is_fallback": bool(is_fallback),
-            "error_text": clean_text(error_text),
-            "latency_ms": int((time.time() - started_at) * 1000) if started_at else "",
-        }
-        import csv
-        file_exists = os.path.exists(path)
-        with open(path, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(row)
-    except Exception:
-        pass
+ensure_logs_dir()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -622,8 +587,11 @@ def is_color_question(user_text: str) -> bool:
 
 def is_recommendation_question(user_text: str) -> bool:
     q = clean_text(user_text)
-    return any(k in q for k in ["추천", "어울리는", "같이 입", "코디", "매치", "무슨 바지", "어떤 바지", "무슨 치마", "잘 어울리는"])
-
+    keywords = [
+        "추천", "어울리는", "같이 입", "코디", "매치", "무슨 바지", "어떤 바지", "무슨 치마", "잘 어울리는",
+        "다른 자켓", "다른 재킷", "다른 아우터", "다른 옷", "맞는 자켓", "맞는 옷", "추천해줘", "골라줘"
+    ]
+    return any(k in q for k in keywords)
 
 def current_product_dict(product_context: Dict, db_product: Optional[Dict]) -> Dict:
     return {
@@ -638,6 +606,106 @@ def current_product_dict(product_context: Dict, db_product: Optional[Dict]) -> D
         "fabric": clean_text((db_product or {}).get("fabric", "")) or clean_text(product_context.get("material", "")),
     }
 
+
+
+def canonical_product_group(product_context: Dict, db_product: Optional[Dict]) -> str:
+    corpus = " ".join([
+        clean_text((db_product or {}).get("category", "")),
+        clean_text((db_product or {}).get("sub_category", "")),
+        clean_text((db_product or {}).get("product_name", "")),
+        clean_text(product_context.get("category", "")),
+        clean_text(product_context.get("product_name", "")),
+    ])
+    if any(k in corpus for k in ["팬츠", "슬랙스", "데님", "청바지", "바지"]):
+        return "bottom"
+    if any(k in corpus for k in ["스커트", "치마"]):
+        return "skirt"
+    if any(k in corpus for k in ["자켓", "재킷", "점퍼", "코트", "아우터", "베스트", "조끼", "트렌치"]):
+        return "outer"
+    if any(k in corpus for k in ["블라우스", "셔츠"]):
+        return "blouse"
+    if any(k in corpus for k in ["니트", "가디건"]):
+        return "knit"
+    if any(k in corpus for k in ["맨투맨", "티셔츠", "후드", "탑"]):
+        return "top"
+    if any(k in corpus for k in ["원피스"]):
+        return "dress"
+    return "other"
+
+
+def get_relevant_user_size(product_context: Dict, db_product: Optional[Dict], body_ctx: Dict[str, str]) -> str:
+    group = canonical_product_group(product_context, db_product)
+    if group in ["bottom", "skirt"]:
+        return clean_text(body_ctx.get("bottom_size", ""))
+    return clean_text(body_ctx.get("top_size", ""))
+
+
+def size_label_for_group(product_context: Dict, db_product: Optional[Dict]) -> str:
+    group = canonical_product_group(product_context, db_product)
+    if group in ["bottom", "skirt"]:
+        return "하의"
+    return "상의"
+
+
+def naturalize_reason(reason: str) -> str:
+    text = clean_text(reason)
+    if not text:
+        return ""
+    replacements = {
+        "DB 기준으로는": "지금 보이는 정보로 보면",
+        "DB 기준": "지금 보이는 정보",
+        "현재 페이지 기준으로는": "지금 느낌으로는",
+        "현재 페이지 기준으로": "지금 느낌으로",
+        "현재 페이지 기준": "지금 느낌",
+        "고객님 상의": "고객님",
+    }
+    for a,b in replacements.items():
+        text = text.replace(a,b)
+    text = text.replace("커버해요", "무리 없이 들어오는 편이에요")
+    text = text.replace("권장 범위 안에 있어요", "가능권 안쪽으로 보여요")
+    text = text.replace("상단 경계에 가까워 보여요", "딱 맞는 쪽에 가까워 보여요")
+    text = text.replace("권장 범위 안쪽으로 보여요", "무리 없는 쪽으로 보여요")
+    return clean_text(text)
+
+
+def build_fit_comment(product_context: Dict, db_product: Optional[Dict], user_text: str) -> str:
+    corpus = " ".join([
+        clean_text((db_product or {}).get("fit_type", "")),
+        clean_text((db_product or {}).get("body_cover_features", "")),
+        clean_text((db_product or {}).get("recommended_body_type", "")),
+        clean_text(product_context.get("fit", "")),
+        clean_text(product_context.get("summary", "")),
+    ])
+    lines = []
+    if "상체" in clean_text(user_text):
+        if any(k in corpus for k in ["여유", "루즈", "여유핏", "오버"]):
+            lines.append("상체가 있으셔도 답답하게 붙는 느낌은 덜한 편이에요.")
+        elif any(k in corpus for k in ["정핏", "슬림", "타이트"]):
+            lines.append("상체 쪽은 살짝 더 또렷하게 느껴지실 수 있어요.")
+    if "키" in clean_text(user_text):
+        length = clean_text((db_product or {}).get("length_type", "")) + " " + clean_text((db_product or {}).get("product_summary", ""))
+        if any(k in length for k in ["크롭", "세미크롭", "골반"]):
+            lines.append("기장감이 아주 길게 떨어지는 타입은 아니라서 키가 작으셔도 비교적 부담이 덜해요.")
+        elif any(k in length for k in ["롱", "길게", "하프"]):
+            lines.append("기장은 조금 길게 느껴질 수 있어서 전체 밸런스는 한번 같이 보시는 게 좋아요.")
+    return " ".join(lines[:2])
+
+
+def should_exclude_item(user_text: str, rowd: Dict) -> bool:
+    q = clean_text(user_text)
+    blob = row_blob(rowd)
+    exclusions = {
+        "후드": ["후드"],
+        "후드집업": ["후드", "집업"],
+        "데님": ["데님", "청"],
+        "청자켓": ["데님", "청"],
+        "롱": ["롱"],
+    }
+    for word, keys in exclusions.items():
+        if f"{word} 말고" in q or f"{word}는 말고" in q or f"{word} 빼고" in q:
+            if any(k in blob for k in keys):
+                return True
+    return False
 
 def row_blob(rowd: Dict) -> str:
     cols = [
@@ -659,64 +727,69 @@ def is_top_product(rowd: Dict) -> bool:
 
 def infer_target_category_from_query(user_text: str, current_product: Dict) -> str:
     q = clean_text(user_text)
-    if any(k in q for k in ["다른 자켓", "자켓 추천", "아우터 추천", "다른 아우터", "다른 옷", "다른 상품"]) and any(k in q for k in ["자켓", "아우터"]):
-        return "자켓"
-    if any(k in q for k in ["바지", "슬랙스", "팬츠", "데님", "청바지"]):
-        return "팬츠"
-    if any(k in q for k in ["스커트", "치마"]):
-        return "스커트"
-    if any(k in q for k in ["자켓", "재킷", "아우터", "코트", "점퍼"]):
-        return "자켓"
+    if any(k in q for k in ["자켓", "재킷", "아우터", "점퍼", "코트"]):
+        return "outer"
     if any(k in q for k in ["블라우스", "셔츠"]):
-        return "블라우스"
-    if "가디건" in q:
-        return "가디건"
-    if "니트" in q:
-        return "니트"
-    current_cat = clean_text(current_product.get("category", ""))
-    current_sub = clean_text(current_product.get("sub_category", ""))
-    corpus = f"{current_cat} {current_sub}"
-    if any(k in corpus for k in ["자켓", "재킷", "점퍼", "코트", "아우터"]):
-        return "자켓"
-    if any(k in corpus for k in TOP_CATS):
-        return "팬츠"
-    if any(k in corpus for k in BOTTOM_CATS):
-        return "블라우스"
-    return ""
+        return "blouse"
+    if any(k in q for k in ["가디건"]):
+        return "cardigan"
+    if any(k in q for k in ["니트"]):
+        return "knit"
+    if any(k in q for k in ["티셔츠", "맨투맨", "후드"]):
+        return "top"
+    if any(k in q for k in ["스커트", "치마"]):
+        return "skirt"
+    if any(k in q for k in ["바지", "슬랙스", "팬츠", "데님", "청바지"]):
+        return "bottom"
 
+    current_group = canonical_product_group(current_product, current_product)
+    if current_group in ["outer", "blouse", "knit", "top", "dress"]:
+        return "bottom"
+    if current_group in ["bottom", "skirt"]:
+        return "top"
+    return ""
 
 def build_product_reason(rowd: Dict, user_text: str) -> List[str]:
     reasons: List[str] = []
     blob = row_blob(rowd)
     name = clean_text(rowd.get("product_name", ""))
-    if any(k in user_text for k in ["학교", "방문"]):
-        reasons.append("학교 방문룩으로 단정하게 받쳐주기 좋아요")
-    elif "출근" in user_text:
-        reasons.append("출근룩으로 깔끔하게 이어주기 좋아요")
-    elif "데일리" in user_text:
-        reasons.append("평소에도 부담 없이 손이 잘 가는 쪽이에요")
-    if "슬랙스" in name or "슬랙스" in blob:
-        reasons.append("라인이 정돈돼 보여서 상의를 깔끔하게 살려줘요")
-    elif "데님" in name or "청바지" in blob:
-        reasons.append("너무 힘주지 않은 분위기로 편하게 매치하기 좋아요")
-    cover = clean_text(rowd.get("body_cover_features", ""))
-    if any(k in cover for k in ["복부", "뱃살"]):
-        reasons.append("복부라인 부담을 덜어줘요")
-    elif "힙" in cover:
-        reasons.append("힙라인 부담이 적은 편이에요")
-    style = clean_text(rowd.get("style_tags", ""))
-    if not reasons and any(k in style for k in ["클래식", "단정"]):
-        reasons.append("전체 분위기가 단정하게 정리돼 보여요")
-    if not reasons:
-        reasons.append("같이 입었을 때 코디가 깔끔하게 정리돼요")
+    category_blob = f"{clean_text(rowd.get('category',''))} {clean_text(rowd.get('sub_category',''))} {name}"
+    q = clean_text(user_text)
+
+    if any(k in q for k in ["자켓", "재킷", "아우터"]):
+        if any(k in blob for k in ["여유", "루즈", "여유핏"]):
+            reasons.append("전체적으로 여유 있게 떨어져서 상체 부담이 덜한 쪽이에요")
+        elif any(k in blob for k in ["정핏", "슬림"]):
+            reasons.append("라인이 너무 퍼지지 않아서 깔끔하게 입기 좋아요")
+        if any(k in blob for k in ["골반", "세미크롭", "크롭"]):
+            reasons.append("기장감이 과하게 길지 않아서 전체 비율이 답답해 보일 가능성이 적어요")
+        if not reasons:
+            reasons.append("지금 찾으시는 자켓 느낌으로 무난하게 손이 갈 만한 쪽이에요")
+    elif any(k in q for k in ["블라우스", "셔츠", "상의", "니트", "맨투맨", "티셔츠"]):
+        if any(k in blob for k in ["여유", "루즈", "커버"]):
+            reasons.append("상체 라인을 너무 드러내지 않아서 편하게 입기 좋아요")
+        else:
+            reasons.append("단독으로 입어도 깔끔하게 정리되는 쪽이에요")
+    elif any(k in q for k in ["바지", "슬랙스", "팬츠", "데님"]):
+        if "슬랙스" in category_blob:
+            reasons.append("라인이 정돈돼 보여서 상의를 깔끔하게 살려줘요")
+        elif any(k in category_blob for k in ["데님", "청바지"]):
+            reasons.append("너무 힘주지 않은 분위기로 편하게 매치하기 좋아요")
+        cover = clean_text(rowd.get("body_cover_features", ""))
+        if any(k in cover for k in ["복부", "뱃살"]):
+            reasons.append("복부라인 부담을 덜어주는 쪽이에요")
+        elif "힙" in cover:
+            reasons.append("힙라인 부담이 적은 편이에요")
+        if not reasons:
+            reasons.append("데일리로 받쳐 입기 편한 쪽이에요")
+    else:
+        reasons.append("지금 문의하신 분위기에 무난하게 잘 붙는 쪽이에요")
+
     out = []
     for r in reasons:
         if r not in out:
             out.append(r)
     return out[:2]
-
-
-
 
 def save_recommendations(recos: List[Dict]) -> None:
     try:
@@ -801,62 +874,51 @@ def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
     idx = (get_recommendation_reference_index(user_text) or 0) + 1
     q = clean_text(user_text)
 
-    if is_name_question(user_text) or any(k in q for k in ["어떤 옷", "어떤 바지", "어떤 상품", "설명", "알려줘", "뭐야"]):
+    if is_name_question(user_text) or any(k in q for k in ["어떤 옷", "어떤 상품", "뭐였지", "다시", "설명", "뭐야", "무슨 번호"]):
         reasons = [clean_text(x) for x in reco.get("reasons", []) if clean_text(x)]
-        reason_line = " ".join(reasons[:2]) if reasons else "지금 문의하신 자리랑 잘 어울리는 쪽으로 먼저 골라드린 상품이에요."
+        reason_line = " ".join(reasons[:2]) if reasons else "아까 흐름에서 고객님 쪽에 더 편하게 맞을 만한 걸로 먼저 골라드린 거예요."
         return (
-            f"{idx}번으로 추천드린 상품은 {reco_context['product_name']}이에요 :)\n"
+            f"{idx}번으로 말씀드린 건 {reco_context['product_name']}이에요 :)\n"
             f"{reason_line}\n"
-            "원하시면 이 상품 기준으로 사이즈감도 바로 이어서 봐드릴게요."
+            "이거 기준으로 사이즈감도 바로 이어서 봐드릴게요."
         )
 
     if is_size_question(user_text):
         body = build_body_context()
-        user_top = clean_text(body.get("top_size", ""))
-        if not user_top:
-            return f"{idx}번으로 추천드린 {reco_context['product_name']} 기준으로 보려면 고객님 평소 상의 사이즈를 먼저 알려주세요 :)"
-        size_eval = evaluate_size_support(user_top, reco_context, reco_db)
-        matched = size_eval.get("matched_option")
-        reason = clean_text(size_eval.get("reason", ""))
-        name = reco_context["product_name"]
-        if size_eval["supported"] is False:
+        user_size = get_relevant_user_size(reco_context, reco_db, body)
+        size_label = size_label_for_group(reco_context, reco_db)
+        if not user_size:
+            return f"{idx}번으로 말씀드린 {reco_context['product_name']}은 {size_label} 사이즈를 알려주시면 더 정확하게 이어서 봐드릴 수 있어요 :)"
+        size_eval = evaluate_size_support(user_size, reco_context, reco_db)
+        reason = naturalize_reason(clean_text(size_eval.get('reason', '')))
+        fit_comment = build_fit_comment(reco_context, reco_db, user_text)
+        extra = f" {fit_comment}" if fit_comment else ""
+        name = reco_context['product_name']
+        if size_eval['supported'] is False:
             return (
-                f"{idx}번으로 추천드린 {name}은 고객님 상의 {user_top} 기준이면 넉넉하게 맞는 쪽으로 보긴 어려워요.\n"
-                f"{reason or '현재 확인되는 사이즈 범위가 고객님보다 작게 잡혀 있어요.'}\n"
-                "편하게 입는 기준이라면 강하게 추천드리긴 어렵고, 조금 더 여유 있는 쪽을 같이 보시는 게 안전해요."
+                f"{idx}번으로 말씀드린 {name}은 고객님 {size_label} {user_size} 기준이면 여유 있게 맞는 쪽으로 보긴 조금 어려워요.\n"
+                f"{reason or '지금 느낌으로는 살짝 타이트하게 느껴질 수 있어요.'}{extra}\n"
+                "편하게 입으실 거면 다른 쪽을 하나 더 같이 보는 게 나아요."
             )
-        if size_eval["supported"] == "edge":
-            label = matched["label"] if matched else "현재 옵션"
+        if size_eval['supported'] == 'edge':
             return (
-                f"{idx}번으로 추천드린 {name}은 고객님 상의 {user_top} 기준이면 가능권에는 들어오지만 경계선에 가까워요.\n"
-                f"{reason or (label + ' 기준으로 상단 사이즈에 가까워 보여요.')}\n"
-                "딱 맞는 느낌으로는 가능할 수 있지만, 여유 있게 입으실 거면 조금 더 편한 쪽이 나을 수 있어요."
+                f"{idx}번으로 말씀드린 {name}은 고객님 {size_label} {user_size} 기준이면 가능권에는 들어오는데 아주 넉넉하진 않을 수 있어요.\n"
+                f"{reason or '딱 맞는 쪽에 조금 더 가까워 보여요.'}{extra}\n"
+                "슬림하게 입는 건 괜찮은데 편한 핏을 원하시면 한 번 더 골라드릴게요."
             )
-        if size_eval["supported"] is True:
-            if matched:
-                return (
-                    f"{idx}번으로 추천드린 {name}은 고객님 상의 {user_top} 기준이면 {matched['label']} 쪽으로 보시면 돼요 :)\n"
-                    f"{reason or '현재 확인되는 범위 안쪽으로 보여요.'}\n"
-                    "부담 없이 입는 쪽으로는 비교적 안정적인 편이에요."
-                )
+        if size_eval['supported'] is True:
             return (
-                f"{idx}번으로 추천드린 {name}은 고객님 상의 {user_top} 기준으로 현재 확인되는 권장 범위 안에 있어요 :)\n"
-                f"{reason}\n"
-                "실측까지 같이 보면 더 정확하지만, 지금 기준으로는 무리 없는 편으로 보여요."
+                f"{idx}번으로 말씀드린 {name}은 고객님 {size_label} {user_size} 기준으로는 비교적 편하게 들어오는 쪽으로 보여요 :)\n"
+                f"{reason or '지금 보이는 정보로는 무리 없는 편이에요.'}{extra}\n"
+                "이 느낌 괜찮으시면 비슷한 쪽으로 더 골라드릴 수도 있어요."
             )
-        db_range = clean_text((reco_db or {}).get("size_range", ""))
-        if db_range:
-            return (
-                f"{idx}번으로 추천드린 {name}은 현재 {db_range} 쪽으로 먼저 안내되는 상품이에요 :)\n"
-                "지금 정보만으로 딱 잘라 말씀드리기보다는 실측을 같이 보면 더 정확해요."
-            )
-        return f"{idx}번으로 추천드린 {name}은 지금 보이는 정보만으로는 확답보다 실측을 같이 보는 쪽이 더 정확해요 :)"
+        return f"{idx}번으로 말씀드린 {name}은 지금 보이는 정보만으로는 확답보다 실측을 같이 보는 쪽이 더 정확해요 :)"
 
     if is_color_question(user_text):
         ans = build_color_answer(reco_context, reco_db)
         if ans:
-            return f"{idx}번으로 추천드린 {reco_context['product_name']} 기준으로 보면, {ans}"
-        return f"{idx}번으로 추천드린 {reco_context['product_name']}은 현재 컬러 정보가 또렷하게 확인되진 않아요."
+            return f"{idx}번으로 말씀드린 {reco_context['product_name']} 기준으로 보면, {ans}"
+        return f"{idx}번으로 말씀드린 {reco_context['product_name']}은 현재 컬러 정보가 또렷하게 확인되진 않아요."
 
     return None
 
@@ -868,7 +930,6 @@ def recommend_products_for_query(user_text: str, current_product: Dict, body_ctx
     top_rank = size_rank(body_ctx.get("top_size", ""))
     bottom_rank = size_rank(body_ctx.get("bottom_size", ""))
     q = clean_text(user_text)
-    preferred = [x for x in ["슬랙스", "데님", "청바지", "와이드", "세미와이드", "일자", "블랙", "베이지", "네이비", "아이보리", "단정", "데일리"] if x in q]
 
     scored: List[Tuple[int, Dict]] = []
     for _, row in DB.iterrows():
@@ -876,50 +937,77 @@ def recommend_products_for_query(user_text: str, current_product: Dict, body_ctx
         row_no = normalize_product_no(rowd.get("product_no", ""))
         if current_no and row_no == current_no:
             continue
+        if should_exclude_item(user_text, rowd):
+            continue
+
         blob = row_blob(rowd)
         explicit = f"{clean_text(rowd.get('category', ''))} {clean_text(rowd.get('sub_category', ''))} {clean_text(rowd.get('product_name', ''))}"
         ranks = expand_size_text(clean_text(rowd.get("size_range", "")))
+        group = canonical_product_group(rowd, rowd)
 
-        if target == "팬츠":
-            if not is_bottom_product(rowd):
-                continue
-            if top_rank is None and bottom_rank and ranks and bottom_rank not in ranks:
-                continue
-            if bottom_rank and ranks and bottom_rank not in ranks:
-                continue
-        elif target == "스커트":
-            if not any(k in explicit for k in ["스커트", "치마"]):
-                continue
-            if bottom_rank and ranks and bottom_rank not in ranks:
-                continue
-        elif target in ["블라우스", "니트", "가디건", "자켓"]:
-            if not is_top_product(rowd):
-                continue
-            if target == "블라우스" and not any(k in explicit for k in ["블라우스", "셔츠"]):
+        if target == "outer":
+            if group != "outer":
                 continue
             if top_rank and ranks and top_rank not in ranks:
                 continue
+        elif target in ["blouse", "cardigan", "knit", "top"]:
+            if group not in ["blouse", "knit", "top"]:
+                continue
+            if target == "blouse" and group != "blouse":
+                continue
+            if target == "cardigan" and "가디건" not in explicit:
+                continue
+            if top_rank and ranks and top_rank not in ranks:
+                continue
+        elif target == "bottom":
+            if group != "bottom":
+                continue
+            if bottom_rank and ranks and bottom_rank not in ranks:
+                continue
+        elif target == "skirt":
+            if group != "skirt":
+                continue
+            if bottom_rank and ranks and bottom_rank not in ranks:
+                continue
 
         score = 0
-        if target == "팬츠":
+        if target == "outer":
             score += 12
+            if any(k in explicit for k in ["자켓", "재킷"]):
+                score += 4
+            if any(k in blob for k in ["여유", "루즈", "커버"]):
+                score += 4
+            if any(k in blob for k in ["골반", "세미크롭", "크롭"]):
+                score += 2
+        elif target in ["blouse", "cardigan", "knit", "top"]:
+            score += 10
+            if any(k in blob for k in ["여유", "커버"]):
+                score += 3
+        elif target == "bottom":
+            score += 10
             if "슬랙스" in q and "슬랙스" in explicit:
-                score += 6
-            if any(k in q for k in ["데님", "청바지"]) and "데님" in explicit:
-                score += 6
-        if target == "스커트" and any(k in explicit for k in ["스커트", "치마"]):
-            score += 12
-        if current_product.get("style_tags"):
+                score += 4
+            if any(k in q for k in ["데님", "청바지"]) and any(k in explicit for k in ["데님", "청바지"]):
+                score += 4
+        elif target == "skirt":
+            score += 10
+
+        if clean_text(current_product.get("style_tags", "")):
             current_tags = set(x for x in re.split(r"[;,/|]", current_product.get("style_tags", "")) if clean_text(x))
             row_tags = set(x for x in re.split(r"[;,/|]", rowd.get("style_tags", "")) if clean_text(x))
             score += len(current_tags & row_tags) * 2
-        score += sum(2 for p in preferred if p in blob)
-        if any(k in q for k in ["학교", "방문"]) and any(k in blob for k in ["단정", "클래식", "슬랙스", "세미와이드", "일자"]):
-            score += 5
-        if "출근" in q and any(k in blob for k in ["단정", "클래식", "슬랙스"]):
-            score += 4
-        if clean_text(rowd.get("body_cover_features", "")):
-            score += 1
+
+        if any(k in q for k in ["학교", "방문"]) and any(k in blob for k in ["단정", "클래식"]):
+            score += 3
+        if any(k in q for k in ["출근", "오피스"]) and any(k in blob for k in ["단정", "클래식"]):
+            score += 3
+        if any(k in q for k in ["상체", "어깨", "팔"]):
+            if any(k in blob for k in ["여유", "루즈", "커버"]):
+                score += 3
+        if any(k in q for k in ["키가 작", "아담", "작은 편"]):
+            if any(k in blob for k in ["골반", "세미크롭", "크롭"]):
+                score += 3
+
         if clean_text(rowd.get("product_name", "")):
             scored.append((score, rowd))
 
@@ -933,13 +1021,16 @@ def recommend_products_for_query(user_text: str, current_product: Dict, body_ctx
         seen.add(name)
         out.append({
             "product_name": name,
+            "product_no": normalize_product_no(rowd.get("product_no", "")),
+            "category": clean_text(rowd.get("category", "")),
+            "sub_category": clean_text(rowd.get("sub_category", "")),
             "size_range": clean_text(rowd.get("size_range", "")),
             "reasons": build_product_reason(rowd, user_text),
+            "_full_row": rowd,
         })
         if len(out) >= limit:
             break
     return out
-
 
 def build_name_answer(product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
     name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", ""))
@@ -955,156 +1046,49 @@ def build_color_answer(product_context: Dict, db_product: Optional[Dict]) -> Opt
     return f"현재 확인되는 컬러는 {', '.join(colors)} 쪽이에요. 없는 컬러를 임의로 말씀드리기보다는 지금 보이는 옵션 기준으로 같이 봐드릴게요 :)"
 
 
-
-
-def infer_product_axis(product_context: Dict, user_text: str = "") -> str:
-    q = clean_text(user_text)
-    corpus = " ".join([
-        clean_text(product_context.get("product_name", "")),
-        clean_text(product_context.get("category", "")),
-        clean_text(product_context.get("sub_category", "")),
-        clean_text(product_context.get("raw_excerpt", "")),
-    ])
-    if any(k in q for k in ["바지", "슬랙스", "팬츠", "청바지", "치마", "스커트", "하의"]):
-        return "bottom"
-    if any(k in q for k in ["자켓", "재킷", "셔츠", "블라우스", "니트", "가디건", "맨투맨", "티", "상의", "아우터", "코트", "점퍼", "조끼"]):
-        return "top"
-    if any(k in corpus for k in BOTTOM_CATS):
-        return "bottom"
-    return "top"
-
-
-def get_user_size_for_product(product_context: Dict, user_text: str = "") -> Tuple[str, str]:
-    body = build_body_context()
-    axis = infer_product_axis(product_context, user_text)
-    if axis == "bottom":
-        return clean_text(body.get("bottom_size", "")), axis
-    return clean_text(body.get("top_size", "")), axis
-
-
-def rewrite_size_reason(reason: str, axis: str, user_size: str) -> str:
-    t = clean_text(reason)
-    if not t:
-        return ""
-    t = t.replace("DB 기준으로는 ", "")
-    t = t.replace("DB 기준으로 ", "")
-    t = t.replace("현재 페이지 기준으로는 ", "")
-    t = t.replace("현재 페이지 기준으로 ", "")
-    t = t.replace("고객님 상의", "")
-    t = t.replace("고객님 하의", "")
-    t = re.sub(r"\s+", " ", t).strip()
-    t = t.replace("권장 범위 안에 있어요", "무리 없는 쪽으로 보여요")
-    t = t.replace("상단 경계에 가까워 보여요", "여유가 아주 많은 쪽은 아니에요")
-    t = t.replace("최대", "보통 ")
-    if "가슴둘레 기준" in t:
-        t = t.replace("가슴둘레 기준으로는 ", "")
-    if axis == "top" and user_size:
-        t = t.replace(f"{user_size}까지 포함되지만", "")
-    return t.strip(" .")
-
-
-def build_natural_size_answer(name: str, axis: str, user_size: str, size_eval: Dict, product_context: Dict) -> str:
-    support = size_eval.get("supported")
-    reason = rewrite_size_reason(size_eval.get("reason", ""), axis, user_size)
-    fit_hint = clean_text(product_context.get("fit", ""))
-    current_name = clean_text(name) or "이 상품"
-    axis_label = "상의" if axis == "top" else "하의"
-    matched = size_eval.get("matched_option")
-
-    if support is False:
-        lines = [f"고객님 {axis_label} {user_size} 기준으로 보면 {current_name}은 여유 있게 맞는 쪽은 아니에요."]
-        if reason:
-            lines.append(reason + ("." if not reason.endswith(("요", ".")) else ""))
-        if axis == "top":
-            lines.append("편하게 입으시는 쪽이면 조금 더 여유 있는 타입으로 같이 보는 게 나아요.")
-        else:
-            lines.append("편하게 입으시는 쪽이면 조금 더 여유 있는 타입으로 같이 보는 게 나아요.")
-        return "\n".join(lines)
-
-    if support == "edge":
-        lines = [f"고객님 {axis_label} {user_size} 기준으로 보면 {current_name}은 입을 수는 있는데 여유가 아주 많은 쪽은 아니에요."]
-        if reason:
-            lines.append(reason + ("." if not reason.endswith(("요", ".")) else ""))
-        lines.append("딱 맞는 느낌은 괜찮지만, 편하게 입으시는 스타일이면 한 단계 더 여유 있는 쪽이 더 잘 맞을 수 있어요.")
-        return "\n".join(lines)
-
-    if support is True:
-        if matched and axis == "top":
-            lines = [f"고객님 {axis_label} {user_size} 기준이면 {matched['label']} 쪽으로 보시면 괜찮아요 :)"]
-        else:
-            lines = [f"고객님 {axis_label} {user_size} 기준으로 보면 {current_name}은 무리 없는 쪽으로 보여요 :)"]
-        if reason:
-            lines.append(reason + ("." if not reason.endswith(("요", ".")) else ""))
-        if fit_hint:
-            if any(k in fit_hint for k in ["정핏", "슬림", "깔끔"]):
-                lines.append("핏이 아주 넉넉한 타입보다는 깔끔하게 떨어지는 쪽에 가까워요.")
-            elif any(k in fit_hint for k in ["여유", "루즈", "오버"]):
-                lines.append("전체적으로 여유 있게 입기 좋은 쪽이에요.")
-        return "\n".join(lines)
-
-    db_range = clean_text(product_context.get("size_tip", ""))
-    if db_range:
-        return f"지금 보이는 정보로는 {current_name}이 {db_range} 쪽으로 안내돼 있어요. 그래도 체감은 핏에 따라 다를 수 있어서 같이 보면 더 정확해요 :)"
-    return f"지금 보이는 정보만으로는 {current_name} 사이즈를 딱 잘라 말씀드리긴 어려워요. 그래도 원하시면 비슷한 다른 상품으로 같이 골라드릴게요 :)"
-
-
-def infer_followup_target_category(user_text: str) -> str:
-    q = clean_text(user_text)
-    if any(k in q for k in ["상의", "윗옷", "블라우스", "셔츠", "니트", "가디건", "맨투맨", "자켓", "재킷", "아우터"]):
-        return "top"
-    if any(k in q for k in ["하의", "바지", "슬랙스", "팬츠", "청바지", "스커트", "치마"]):
-        return "bottom"
-    return ""
-
 def build_size_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
     if not is_size_question(user_text):
         return None
     body = build_body_context()
-    user_top = clean_text(body.get("top_size", ""))
-    if not user_top:
-        return "상의 사이즈를 같이 입력해주시면 더 정확하게 봐드릴 수 있어요 :) 지금은 고객님 평소 상의 사이즈를 먼저 알려주세요."
+    user_size = get_relevant_user_size(product_context, db_product, body)
+    size_label = size_label_for_group(product_context, db_product)
+    if not user_size:
+        return f"{size_label} 사이즈를 알려주시면 제가 더 정확하게 같이 봐드릴 수 있어요 :)"
 
     current_name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품")
-    size_eval = evaluate_size_support(user_top, product_context, db_product)
-    matched = size_eval.get("matched_option")
-    reason = clean_text(size_eval.get("reason", ""))
+    size_eval = evaluate_size_support(user_size, product_context, db_product)
+    reason = naturalize_reason(clean_text(size_eval.get("reason", "")))
+    fit_comment = build_fit_comment(product_context, db_product, user_text)
+    extra = f" {fit_comment}" if fit_comment else ""
 
     if size_eval["supported"] is False:
+        line2 = reason or "지금 느낌으로는 여유 있게 맞는 타입으로 보긴 조금 어려워요."
         return (
-            f"고객님 상의 {user_top} 기준이면 {current_name}은 넉넉하게 맞는 쪽으로 보긴 어려워요.\n"
-            f"{reason or '현재 확인되는 사이즈 범위가 고객님보다 작게 잡혀 있어요.'}\n"
-            "편하게 입는 기준이라면 추천을 강하게 드리긴 어렵고, 실측표를 꼭 같이 보시는 쪽이 안전해요."
+            f"고객님 {size_label} {user_size} 기준으로 보면 {current_name}은 편하게 맞는 쪽보다는 살짝 타이트하게 느껴질 수 있어요.\n"
+            f"{line2}{extra}\n"
+            "평소 딱 맞게 입는 것보다 조금 편한 핏을 좋아하시면, 한 단계 더 여유 있는 쪽을 같이 보는 게 나아요."
         )
 
     if size_eval["supported"] == "edge":
-        label = matched["label"] if matched else "현재 옵션"
+        line2 = reason or "입으실 수는 있는데 딱 맞는 쪽에 가까워 보여요."
         return (
-            f"고객님 상의 {user_top} 기준이면 {current_name}은 가능권에는 들어오지만 경계선에 가까운 편이에요.\n"
-            f"{reason or (label + ' 기준으로 상단 사이즈에 가까워 보여요.')}\n"
-            "딱 맞게 입는 느낌은 가능할 수 있지만, 여유 있는 핏을 원하시면 아주 넉넉하다고 보긴 어려워요."
+            f"고객님 {size_label} {user_size} 기준으로 보면 {current_name}은 가능권에는 들어오는데 아주 여유로운 느낌은 아닐 수 있어요.\n"
+            f"{line2}{extra}\n"
+            "몸에 너무 붙는 옷을 선호하지 않으시면 조금 더 편한 쪽이 만족도는 높을 수 있어요."
         )
 
     if size_eval["supported"] is True:
-        if matched:
-            return (
-                f"고객님 상의 {user_top} 기준이면 {matched['label']} 쪽으로 보시면 돼요 :)\n"
-                f"{reason or ('현재 페이지 기준으로 ' + matched['label'] + '가 ' + matched['size_desc'] + ' 정도로 안내돼 있어요.')}\n"
-                "다만 원하시는 핏이 슬림한지, 편하게 입는지에 따라 체감은 조금 달라질 수 있어요."
-            )
+        line2 = reason or "지금 보이는 정보로는 무리 없는 쪽으로 보여요."
         return (
-            f"고객님 상의 {user_top} 기준이면 {current_name}은 현재 확인되는 권장 범위 안쪽으로 보여요 :)\n"
-            f"{reason}\n"
-            "그래도 상체를 여유 있게 입으시는 편이면 실측까지 함께 보는 쪽이 가장 안전해요."
+            f"고객님 {size_label} {user_size} 기준으로 보면 {current_name}은 무리 없이 입으실 수 있는 쪽으로 보여요 :)\n"
+            f"{line2}{extra}\n"
+            "원하시면 제가 이 느낌 기준으로 더 잘 맞을 만한 다른 상품도 같이 골라드릴게요."
         )
 
-    db_range = clean_text((db_product or {}).get("size_range", ""))
-    if db_range:
-        return (
-            f"현재 확인되는 기준으로는 {current_name}이 {db_range} 쪽으로 안내되고 있어요 :)\n"
-            "다만 지금 정보만으로 단정하기보다, 상세페이지 실측표를 함께 보는 쪽이 더 정확해요."
-        )
-    return "지금은 사이즈 정보가 또렷하게 잡히지 않아서 확답드리기보다, 상세페이지 실측표를 같이 보시는 쪽이 안전해요 :)"
-
+    return (
+        f"지금 보이는 정보만으로는 {current_name} 사이즈를 딱 잘라 말씀드리긴 어려워요.\n"
+        "그래도 원하시면 제가 비슷한 느낌의 다른 상품 쪽으로 같이 골라드릴게요 :)"
+    )
 
 def build_recommendation_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
     if not is_recommendation_question(user_text):
@@ -1113,27 +1097,24 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
     body_ctx = build_body_context()
     recos = recommend_products_for_query(user_text, current_product, body_ctx, limit=3)
     if not recos:
-        return "원하시는 조건으로 바로 딱 맞는 상품이 지금은 또렷하게 안 잡혀요. 그래도 비슷한 분위기로 다시 골라드릴 수 있으니, 자켓인지 바지인지 한 번만 더 말씀해주세요 :)"
+        return "지금 바로 딱 맞는 후보가 선명하게 안 잡혀서요. 원하시면 자켓 쪽 / 블라우스 쪽처럼 한 번만 더 말씀해주시면 그쪽으로 바로 좁혀드릴게요 :)"
     save_recommendations(recos)
     target = infer_target_category_from_query(user_text, current_product)
-    if target == "팬츠":
-        opener = "네, 고객님이랑 잘 맞을 만한 바지부터 골라드릴게요."
-    elif target == "스커트":
-        opener = "네, 분위기 잘 맞는 스커트로 먼저 골라드릴게요."
-    elif target == "자켓":
-        opener = "네, 고객님 사이즈에 더 잘 맞을 만한 자켓으로 먼저 골라드릴게요."
+    if target == "outer":
+        opener = "네, 고객님 쪽에 조금 더 잘 맞을 만한 자켓으로 먼저 골라드릴게요."
+    elif target in ["blouse", "cardigan", "knit", "top"]:
+        opener = "네, 고객님 쪽에 편하게 받쳐 입기 좋은 상의로 먼저 골라드릴게요."
+    elif target == "skirt":
+        opener = "네, 지금 분위기랑 잘 맞는 스커트로 먼저 골라드릴게요."
     else:
-        opener = "네, 지금 말씀하신 느낌에 맞춰서 먼저 골라드릴게요."
+        opener = "네, 고객님 쪽에 잘 맞을 만한 걸로 먼저 골라드릴게요."
     lines = [opener]
     for i, reco in enumerate(recos, start=1):
-        reason_text = " ".join([clean_text(x) for x in reco.get("reasons", []) if clean_text(x)][:2])
-        line = f"{i}. {reco['product_name']}"
-        if reason_text:
-            line += f" - {reason_text}"
-        lines.append(line)
-    lines.append("마음 가는 번호 말씀해주시면 그 상품 기준으로 사이즈감도 바로 이어서 봐드릴게요.")
+        reason_text = " ".join(reco.get("reasons", [])[:2]).strip()
+        line = f"{i}. {reco['product_name']} — {reason_text}" if reason_text else f"{i}. {reco['product_name']}"
+        lines.append(line.strip())
+    lines.append("마음 가는 번호 말씀해주시면 그 상품 기준으로 사이즈감까지 바로 이어서 봐드릴게요 :)" )
     return "\n".join(lines)
-
 
 def trim_text(text: str, max_len: int = 500) -> str:
     t = clean_text(text)
@@ -1212,7 +1193,6 @@ def call_llm(user_text: str, product_context: Dict, db_product: Optional[Dict]) 
 
 def safe_llm_fallback(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
     for builder in [
-        lambda: build_followup_recommendation_answer(user_text),
         lambda: build_name_answer(product_context, db_product) if is_name_question(user_text) else None,
         lambda: get_fast_policy_answer(user_text),
         lambda: build_size_answer(user_text, product_context, db_product),
@@ -1222,15 +1202,56 @@ def safe_llm_fallback(user_text: str, product_context: Dict, db_product: Optiona
         ans = builder()
         if ans:
             return ans
-    return "지금 바로 딱 맞는 답을 끊기지 않게 이어드리지 못했어요. 같은 뜻으로 한 번만 짧게 말씀해주시면 이번엔 그 흐름 그대로 이어서 봐드릴게요 :)"
+    return "지금 문의가 잠시 몰려서 답변 연결이 늦어지고 있어요. 같은 내용을 잠깐 뒤 한 번만 다시 보내주시면 바로 이어서 도와드릴게요 :)"
 
+
+
+
+def get_session_id() -> str:
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = str(int(time.time()*1000))
+    return st.session_state.session_id
+
+
+def ensure_logs_dir() -> str:
+    path = "logs"
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def append_chat_log(event_type: str, product_context: Dict, user_text: str = "", response_mode: str = "", fallback_reason: str = "", is_fallback: bool = False, error_text: str = "", latency_ms: int = 0, assistant_text: str = "") -> None:
+    try:
+        import csv
+        log_dir = ensure_logs_dir()
+        filename = os.path.join(log_dir, f"chat_log_{time.strftime('%Y%m%d')}.csv")
+        file_exists = os.path.exists(filename)
+        row = {
+            "event_type": event_type,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "session_id": get_session_id(),
+            "product_no": normalize_product_no(clean_text(product_context.get("product_no", ""))),
+            "product_name": clean_text(product_context.get("product_name", "")),
+            "user_text": clean_text(user_text),
+            "response_mode": clean_text(response_mode),
+            "fallback_reason": clean_text(fallback_reason),
+            "is_fallback": bool(is_fallback),
+            "error_text": clean_text(error_text),
+            "latency_ms": int(latency_ms or 0),
+        }
+        with open(filename, "a", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+    except Exception:
+        pass
 
 def process_user_message(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> None:
     user_hash = str(hash(clean_text(user_text)))
     now = time.time()
     if st.session_state.is_processing:
         return
-    if user_hash == st.session_state.last_user_hash and now - st.session_state.last_user_ts < 4 and st.session_state.last_answer:
+    if user_hash == st.session_state.last_user_hash and now - st.session_state.last_user_ts < 2 and st.session_state.last_answer:
         st.session_state.messages.append({"role": "assistant", "content": st.session_state.last_answer})
         return
 
@@ -1238,27 +1259,61 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
     st.session_state.last_user_ts = now
     st.session_state.is_processing = True
     st.session_state.messages.append({"role": "user", "content": user_text})
+    append_chat_log("user_message", product_context, user_text=user_text)
+    started = time.time()
+    response_mode = ""
+    fallback_reason = ""
+    is_fallback = False
+    error_text = ""
     try:
+        answer = None
         followup_answer = build_followup_recommendation_answer(user_text)
-        # deterministic answers first
-        direct_answers = [
-            followup_answer,
-            build_name_answer(product_context, db_product) if is_name_question(user_text) else None,
-            get_fast_policy_answer(user_text),
-            build_size_answer(user_text, product_context, db_product),
-            build_recommendation_answer(user_text, product_context, db_product),
-            build_color_answer(product_context, db_product) if is_color_question(user_text) else None,
-        ]
-        answer = next((a for a in direct_answers if a), None)
+        if followup_answer:
+            answer = followup_answer
+            response_mode = "rule"
+        if not answer and is_name_question(user_text):
+            answer = build_name_answer(product_context, db_product)
+            response_mode = "rule"
+        if not answer:
+            answer = get_fast_policy_answer(user_text)
+            if answer:
+                response_mode = "rule"
+        if not answer:
+            answer = build_size_answer(user_text, product_context, db_product)
+            if answer:
+                response_mode = "rule"
+        if not answer:
+            answer = build_recommendation_answer(user_text, product_context, db_product)
+            if answer:
+                response_mode = "rule"
+        if not answer and is_color_question(user_text):
+            answer = build_color_answer(product_context, db_product)
+            if answer:
+                response_mode = "rule"
         if not answer and llm_can_help(user_text):
             answer = call_llm(user_text, product_context, db_product)
+            if answer:
+                response_mode = "llm"
         if not answer:
             answer = safe_llm_fallback(user_text, product_context, db_product)
+            response_mode = response_mode or "fallback"
+            fallback_reason = "no_answer_path"
+            is_fallback = True
+        answer = clean_text(answer).replace("DB 기준", "").replace("상품정보상", "").replace("현재 페이지 기준", "지금 느낌으로")
+        answer = re.sub(r"\s{2,}", " ", answer).strip()
         st.session_state.last_answer = answer
         st.session_state.messages.append({"role": "assistant", "content": answer})
+        latency_ms = int((time.time() - started) * 1000)
+        append_chat_log("assistant_response", product_context, user_text=user_text, response_mode=response_mode, fallback_reason=fallback_reason, is_fallback=is_fallback, latency_ms=latency_ms)
+    except Exception as e:
+        error_text = f"{type(e).__name__}: {e}"
+        answer = "제가 지금 말을 조금 매끄럽게 못 이었네요. 같은 뜻으로 제가 바로 다시 이어서 볼게요 :)"
+        st.session_state.last_answer = answer
+        st.session_state.messages.append({"role": "assistant", "content": answer})
+        latency_ms = int((time.time() - started) * 1000)
+        append_chat_log("error", product_context, user_text=user_text, response_mode="error", fallback_reason="exception", is_fallback=True, error_text=error_text, latency_ms=latency_ms)
     finally:
         st.session_state.is_processing = False
-
 
 # query params
 qp = st.query_params
