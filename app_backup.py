@@ -582,34 +582,6 @@ def chest_support_signal(user_rank: Optional[int], product_context: Dict, db_pro
 
 
 
-def infer_relaxed_fit_signal(user_rank: Optional[int], product_context: Dict, db_product: Optional[Dict]) -> Dict:
-    if not user_rank:
-        return {"status": None, "reason": ""}
-    corpus = " ".join([
-        clean_text((db_product or {}).get("fit_type", "")),
-        clean_text((db_product or {}).get("body_cover_features", "")),
-        clean_text((db_product or {}).get("recommended_body_type", "")),
-        clean_text((db_product or {}).get("product_summary", "")),
-        clean_text(product_context.get("fit", "")),
-        clean_text(product_context.get("summary", "")),
-        clean_text(product_context.get("size_tip", "")),
-        clean_text(product_context.get("raw_excerpt", ""))[:1500],
-    ])
-    if not corpus:
-        return {"status": None, "reason": ""}
-
-    roomy_hits = sum(1 for k in ["여유", "여유핏", "루즈", "루즈핏", "오버핏", "드롭숄더", "드롭 숄더", "체형 커버", "군살 커버", "박시", "넉넉", "품이 여유", "77까지", "77반까지", "88까지"] if k in corpus)
-    slim_hits = sum(1 for k in ["정핏", "슬림", "타이트", "작게", "컴팩트", "붙는", "라인이 드러", "크롭"] if k in corpus)
-
-    if roomy_hits >= 2 and slim_hits == 0:
-        if user_rank <= size_rank("77반"):
-            return {"status": True, "reason": "현재 상품 설명상 여유 있는 핏과 체형 커버 쪽으로 안내되는 편이에요."}
-        return {"status": "edge", "reason": "현재 상품 설명상 여유핏 쪽으로 보이지만, 고객님 사이즈에서는 경계선일 수 있어요."}
-    if slim_hits >= 2 and roomy_hits == 0:
-        return {"status": False, "reason": "현재 상품 설명상 슬림하거나 컴팩트한 핏에 가까워 보여요."}
-    return {"status": None, "reason": ""}
-
-
 def evaluate_size_support(user_top: str, product_context: Dict, db_product: Optional[Dict]) -> Dict:
     user_rank = size_rank(user_top)
     if not user_rank:
@@ -650,7 +622,7 @@ def evaluate_size_support(user_top: str, product_context: Dict, db_product: Opti
             }
         return {
             "supported": True,
-            "reason": f"현재 페이지 기준으로 {matched['label']} 사이즈가 고객님 사이즈를 커버해요. {chest_signal.get('reason','').strip()}".strip(),
+            "reason": f"현재 페이지 기준으로 {matched['label']} 사이즈가 고객님 {size_label} {user_size}을 커버해요. {chest_signal.get('reason','').strip()}".strip(),
             "matched_option": matched,
             "confidence": "page+measure",
         }
@@ -682,7 +654,7 @@ def evaluate_size_support(user_top: str, product_context: Dict, db_product: Opti
             }
         return {
             "supported": True,
-            "reason": f"DB 기준으로는 고객님 사이즈가 권장 범위 안에 있어요. {chest_signal.get('reason','').strip()}".strip(),
+            "reason": f"DB 기준으로는 고객님 {size_label} {user_size}이 권장 범위 안에 있어요. {chest_signal.get('reason','').strip()}".strip(),
             "matched_option": None,
             "confidence": "db+measure",
         }
@@ -695,16 +667,8 @@ def evaluate_size_support(user_top: str, product_context: Dict, db_product: Opti
             "confidence": "measure-only",
         }
 
-    fit_signal = infer_relaxed_fit_signal(user_rank, product_context, db_product)
-    if fit_signal.get("status") in [False, "edge", True]:
-        return {
-            "supported": fit_signal.get("status"),
-            "reason": fit_signal.get("reason", ""),
-            "matched_option": None,
-            "confidence": "fit-heuristic",
-        }
-
     return {"supported": None, "reason": "", "matched_option": None, "confidence": "unknown"}
+
 
 def is_size_question(user_text: str) -> bool:
     q = clean_text(user_text).replace(" ", "")
@@ -1121,7 +1085,7 @@ def build_size_answer(user_text: str, product_context: Dict, db_product: Optiona
             f"현재 확인되는 기준으로는 {current_name}이 {db_range} 쪽으로 안내되고 있어요 :)\n"
             "다만 지금 정보만으로 단정하기보다, 상세페이지 실측표를 함께 보는 쪽이 더 정확해요."
         )
-    return "지금은 실측 수치가 또렷하진 않지만, 상품 설명상 핏 방향은 같이 봐드릴 수 있어요. 평소 딱 맞게 입으시는지, 편하게 입으시는지도 함께 말씀해주시면 더 정확하게 이어서 봐드릴게요 :)"
+    return "지금은 사이즈 정보가 또렷하게 잡히지 않아서 확답드리기보다, 상세페이지 실측표를 같이 보시는 쪽이 안전해요 :)"
 
 
 def build_recommendation_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
