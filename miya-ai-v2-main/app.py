@@ -61,7 +61,6 @@ SYSTEM_PROMPT = """
 5. 데이터가 부족하면 추측하지 말고 짧고 솔직하게 말한다.
 6. 답변은 3~6문장, 자연스러운 MD 상담체, 먼저 결론부터 말한다.
 7. 메뉴명, 로그인 텍스트, 사이트 네비게이션 같은 잡텍스트를 상품정보로 취급하지 않는다.
-8. DB에 있는 size_range, fit_type, body_cover_features, coordination_items를 페이지 텍스트보다 우선 근거로 활용한다.
 """.strip()
 
 
@@ -916,141 +915,55 @@ def build_color_answer(product_context: Dict, db_product: Optional[Dict]) -> Opt
     return f"현재 확인되는 컬러는 {', '.join(colors)} 쪽이에요. 없는 컬러를 임의로 말씀드리기보다는 지금 보이는 옵션 기준으로 같이 봐드릴게요 :)"
 
 
-def product_axis(product_context: Dict, db_product: Optional[Dict]) -> str:
-    corpus = " ".join([
-        clean_text((db_product or {}).get("category", "")),
-        clean_text((db_product or {}).get("sub_category", "")),
-        clean_text((db_product or {}).get("product_name", "")),
-        clean_text(product_context.get("category", "")),
-        clean_text(product_context.get("product_name", "")),
-    ])
-    return "bottom" if any(k in corpus for k in BOTTOM_CATS) and not any(k in corpus for k in ["셔츠", "블라우스", "가디건", "니트", "자켓", "재킷", "점퍼", "코트", "맨투맨", "티셔츠"]) else "top"
-
-
-def fit_phrase(db_product: Optional[Dict], product_context: Dict) -> str:
-    fit = clean_text((db_product or {}).get("fit_type", "") or product_context.get("fit", ""))
-    body_cover = clean_text((db_product or {}).get("body_cover_features", ""))
-    length_type = clean_text((db_product or {}).get("length_type", ""))
-    parts = []
-    if fit:
-        if any(k in fit for k in ["루즈", "여유", "오버"]):
-            parts.append("전체적으로 여유 있게 떨어지는 핏이라 부담이 덜한 편이에요.")
-        elif "정핏" in fit:
-            parts.append("정핏에 가까워서 아주 넉넉한 타입보다는 깔끔하게 맞는 쪽에 가까워요.")
-        elif any(k in fit for k in ["슬림", "타이트"]):
-            parts.append("실루엣이 비교적 슬림하게 잡히는 편이라 여유감은 크게 보시면 안 돼요.")
-    if body_cover:
-        cover_map = {
-            "팔뚝커버": "팔 라인 부담을 덜어주는 쪽이에요.",
-            "배커버": "복부 라인을 가리기 좋은 편이에요.",
-            "복부커버": "복부 라인을 가리기 좋은 편이에요.",
-            "힙커버": "힙을 덮거나 걸쳐주는 느낌으로 안정감이 있어요.",
-        }
-        for key, sentence in cover_map.items():
-            if key in body_cover and sentence not in parts:
-                parts.append(sentence)
-                break
-    if length_type:
-        if any(k in length_type for k in ["크롭", "숏"]):
-            parts.append("기장이 짧은 쪽이라 키가 작으신 분도 비율이 답답해 보일 가능성은 적어요.")
-        elif any(k in length_type for k in ["롱", "하프"]):
-            parts.append("기장이 어느 정도 있는 편이라 안정감 있게 떨어지는 타입이에요.")
-        elif "기본" in length_type:
-            parts.append("기장감도 과하게 길지 않아 데일리로 무난하게 입기 좋아요.")
-    return " ".join(parts[:2])
-
-
-def extract_height_hint(user_text: str, db_product: Optional[Dict], product_context: Dict) -> str:
-    q = clean_text(user_text)
-    axis = product_axis(product_context, db_product)
-    if "키가 작" in q or "작은 편" in q or "키작" in q:
-        if axis == "top":
-            return "키가 작으신 편이어도 기장이나 어깨가 과하게 커 보일 타입은 아니라 답답한 느낌은 덜할 가능성이 커요."
-        return "키가 작으신 편이면 팬츠 길이감은 한 번 더 보셔야 하지만, 전체 실루엣 자체는 과하게 부해 보이는 타입은 아니에요."
-    if "키가 크" in q or "큰 편" in q:
-        if axis == "top":
-            return "키가 있으신 편이면 상체 실루엣이 더 시원하게 살아날 수 있어요."
-        return "키가 있으신 편이면 길이감이 더 자연스럽게 살아날 가능성이 커요."
-    return ""
-
-
-def size_sales_line(axis: str, supported, user_size: str, name: str) -> str:
-    label = "상의" if axis == "top" else "하의"
-    if supported is False:
-        return f"고객님 {label} {user_size} 기준이면 {name}은 넉넉하게 맞는 쪽으로 보긴 어려워요."
-    if supported == "edge":
-        return f"고객님 {label} {user_size} 기준이면 {name}은 입으실 수 있는 범위에는 들어오지만 여유가 아주 많은 쪽은 아니에요."
-    if supported is True:
-        return f"고객님 {label} {user_size} 기준이면 {name}은 잘 맞는 쪽으로 먼저 봐드려도 괜찮아요 :)"
-    return f"고객님 {label} {user_size} 기준으로 {name}을 같이 봐드릴게요."
-
-
 def build_size_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
     if not is_size_question(user_text):
         return None
     body = build_body_context()
-    axis = product_axis(product_context, db_product)
-    user_size = clean_text(body.get("bottom_size", "")) if axis == "bottom" else clean_text(body.get("top_size", ""))
-    if not user_size:
-        ask_label = "하의" if axis == "bottom" else "상의"
-        return f"{ask_label} 사이즈를 같이 입력해주시면 더 정확하게 봐드릴 수 있어요 :) 지금은 고객님 평소 {ask_label} 사이즈를 먼저 알려주세요."
+    user_top = clean_text(body.get("top_size", ""))
+    if not user_top:
+        return "상의 사이즈를 같이 입력해주시면 더 정확하게 봐드릴 수 있어요 :) 지금은 고객님 평소 상의 사이즈를 먼저 알려주세요."
 
     current_name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품")
-    size_eval = evaluate_size_support(user_size, product_context, db_product)
+    size_eval = evaluate_size_support(user_top, product_context, db_product)
     matched = size_eval.get("matched_option")
     reason = clean_text(size_eval.get("reason", ""))
-    db_range = clean_text((db_product or {}).get("size_range", ""))
-    fit_line = fit_phrase(db_product, product_context)
-    height_line = extract_height_hint(user_text, db_product, product_context)
 
     if size_eval["supported"] is False:
-        lines = [
-            size_sales_line(axis, False, user_size, current_name),
-            reason or (f"DB 기준 권장 범위가 {db_range} 쪽으로 잡혀 있어서 고객님 사이즈보다는 작게 보는 게 안전해요." if db_range else "현재 확인되는 기준으로는 여유 있게 맞는 타입으로 보긴 어려워요."),
-        ]
-        if fit_line:
-            lines.append(fit_line)
-        lines.append("편하게 입는 기준이라면 다른 상품을 같이 보시는 쪽이 더 안전해요.")
-        return "\n".join(lines)
+        return (
+            f"고객님 상의 {user_top} 기준이면 {current_name}은 넉넉하게 맞는 쪽으로 보긴 어려워요.\n"
+            f"{reason or '현재 확인되는 사이즈 범위가 고객님보다 작게 잡혀 있어요.'}\n"
+            "편하게 입는 기준이라면 추천을 강하게 드리긴 어렵고, 실측표를 꼭 같이 보시는 쪽이 안전해요."
+        )
 
     if size_eval["supported"] == "edge":
-        lines = [
-            size_sales_line(axis, "edge", user_size, current_name),
-            reason or (f"DB 기준으로는 {user_size}까지 포함되지만 상단 경계에 가까운 편이에요."),
-        ]
-        if fit_line:
-            lines.append(fit_line)
-        if height_line:
-            lines.append(height_line)
-        lines.append("딱 맞는 느낌은 가능하지만, 편하게 입으시는 기준이면 한 단계 더 여유 있는 타입이 더 만족도 높을 수 있어요.")
-        return "\n".join(lines)
+        label = matched["label"] if matched else "현재 옵션"
+        return (
+            f"고객님 상의 {user_top} 기준이면 {current_name}은 가능권에는 들어오지만 경계선에 가까운 편이에요.\n"
+            f"{reason or (label + ' 기준으로 상단 사이즈에 가까워 보여요.')}\n"
+            "딱 맞게 입는 느낌은 가능할 수 있지만, 여유 있는 핏을 원하시면 아주 넉넉하다고 보긴 어려워요."
+        )
 
     if size_eval["supported"] is True:
-        lines = [size_sales_line(axis, True, user_size, current_name)]
         if matched:
-            lines.append(f"현재 페이지 기준으로는 {matched['label']} 쪽으로 보시면 돼요.")
-        elif reason:
-            lines.append(reason)
-        elif db_range:
-            lines.append(f"DB 기준 권장 범위도 {db_range} 쪽이라 고객님 사이즈가 안쪽으로 들어와요.")
-        if fit_line:
-            lines.append(fit_line)
-        if height_line:
-            lines.append(height_line)
-        lines.append("원하시는 느낌이 깔끔핏인지 편한 핏인지까지 말씀해주시면 더 좁혀서 봐드릴게요.")
-        return "\n".join(lines)
+            return (
+                f"고객님 상의 {user_top} 기준이면 {matched['label']} 쪽으로 보시면 돼요 :)\n"
+                f"{reason or ('현재 페이지 기준으로 ' + matched['label'] + '가 ' + matched['size_desc'] + ' 정도로 안내돼 있어요.')}\n"
+                "다만 원하시는 핏이 슬림한지, 편하게 입는지에 따라 체감은 조금 달라질 수 있어요."
+            )
+        return (
+            f"고객님 상의 {user_top} 기준이면 {current_name}은 현재 확인되는 권장 범위 안쪽으로 보여요 :)\n"
+            f"{reason}\n"
+            "그래도 상체를 여유 있게 입으시는 편이면 실측까지 함께 보는 쪽이 가장 안전해요."
+        )
 
-    lines = []
+    db_range = clean_text((db_product or {}).get("size_range", ""))
     if db_range:
-        lines.append(f"DB 기준으로는 {current_name}이 {db_range} 쪽으로 먼저 안내되는 상품이에요.")
-    if fit_line:
-        lines.append(fit_line)
-    if height_line:
-        lines.append(height_line)
-    if lines:
-        lines.append("지금 보이는 기준으로는 이렇게 먼저 판단되고, 원하시면 제가 핏감 기준으로 더 보수적으로도 봐드릴게요.")
-        return "\n".join(lines)
-    return "지금은 페이지 정보보다 DB 쪽 기준을 더 확인해야 하는 상품이라, 원하시면 고객님 평소 핏 선호까지 같이 보고 더 보수적으로 안내드릴게요 :)"
+        return (
+            f"현재 확인되는 기준으로는 {current_name}이 {db_range} 쪽으로 안내되고 있어요 :)\n"
+            "다만 지금 정보만으로 단정하기보다, 상세페이지 실측표를 함께 보는 쪽이 더 정확해요."
+        )
+    return "지금은 사이즈 정보가 또렷하게 잡히지 않아서 확답드리기보다, 상세페이지 실측표를 같이 보시는 쪽이 안전해요 :)"
+
 
 def build_recommendation_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
     if not is_recommendation_question(user_text):
