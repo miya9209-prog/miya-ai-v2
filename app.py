@@ -138,7 +138,6 @@ def ensure_state() -> None:
 
 
 ensure_state()
-ensure_logs_dir()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
