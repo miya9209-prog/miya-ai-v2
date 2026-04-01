@@ -1,5 +1,0 @@
-streamlit
-openai>=1.30.0,<2
-pandas
-requests
-beautifulsoup4
