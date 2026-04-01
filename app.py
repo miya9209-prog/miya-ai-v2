@@ -148,10 +148,35 @@ def recommendation_intro(target: str) -> str:
     if target == "스커트":
         return "네, 고객님 기준으로 입기 편한 스커트 쪽으로 먼저 골라드릴게요."
     if target == "자켓":
-        return "네, 고객님 사이즈에 더 잘 맞을 만한 자켓으로 먼저 골라드릴게요."
+        return "네, 고객님 기준으로 자켓 쪽 먼저 골라드릴게요."
     if target in ["블라우스", "셔츠"]:
         return "네, 고객님 기준으로 깔끔하게 입기 좋은 상의로 먼저 골라드릴게요."
     return "네, 고객님 기준으로 더 잘 맞을 만한 상품으로 먼저 골라드릴게요."
+
+
+def extract_negative_preferences(user_text: str) -> List[str]:
+    q = clean_text(user_text).replace(" ", "")
+    negatives: List[str] = []
+    mapping = {
+        "후드": ["후드말고", "후드빼고", "후드제외", "후드집업말고", "후드아닌"],
+        "집업": ["집업말고", "집업빼고", "집업제외", "집업아닌"],
+        "크롭": ["크롭말고", "크롭빼고", "크롭제외", "짧은거말고", "기장짧은거말고"],
+        "데님": ["데님말고", "청자켓말고", "청말고"],
+        "트위드": ["트위드말고", "트위드빼고"],
+    }
+    for label, words in mapping.items():
+        if any(w in q for w in words):
+            negatives.append(label)
+    return negatives
+
+
+def is_recommendation_list_followup(user_text: str) -> bool:
+    q = clean_text(user_text).replace(" ", "")
+    clues = [
+        "번호가뭐", "번호는뭐", "몇번", "뭐추천", "자켓추천해줘", "다시추천", "다른걸로추천",
+        "후드집업말고", "후드말고", "집업말고", "자켓을추천", "추천해줘", "사이즈감이무슨말", "무슨말이야"
+    ]
+    return bool(st.session_state.get("last_recommendations")) and any(c in q for c in clues)
 
 
 def is_bottom_context(product_context: Dict, db_product: Optional[Dict]) -> bool:
@@ -911,7 +936,7 @@ def get_recommendation_reference_index(user_text: str) -> Optional[int]:
     for idx, words in mapping.items():
         if any(w in q for w in words):
             return idx
-    if any(w in q for w in ["방금추천", "추천해준", "그거", "그상품", "그옷", "그바지"]):
+    if any(w in q for w in ["방금추천", "추천해준", "그거", "그상품", "그옷", "그바지", "그자켓", "그거말한", "그상품말한"]):
         return 0
     return None
 
@@ -966,14 +991,14 @@ def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
     idx = (get_recommendation_reference_index(user_text) or 0) + 1
     q = clean_text(user_text)
 
-    if is_name_question(user_text) or any(k in q for k in ["어떤 옷", "어떤 바지", "어떤 상품", "설명", "알려줘", "뭐야"]):
+    if is_name_question(user_text) or any(k in q for k in ["어떤 옷", "어떤 바지", "어떤 상품", "설명", "알려줘", "뭐야", "번호", "사이즈감이 무슨 말", "무슨 말이야"]):
         reasons = [clean_text(x) for x in reco.get("reasons", []) if clean_text(x)]
         reason_line = " ".join(reasons[:2]) if reasons else "고객님 질문 기준으로 부담 덜한 쪽으로 먼저 골라드린 상품이에요."
-        return (
-            f"{idx}번으로 말씀드린 상품은 {reco_context['product_name']}이에요 🙂\n"
-            f"{reason_line}\n"
-            "원하시면 이 상품도 사이즈감 바로 이어서 봐드릴게요."
-        )
+        lines = [f"{idx}번으로 말씀드린 상품은 {reco_context['product_name']}이에요 🙂", reason_line]
+        if clean_text(reco_context.get("size_tip", "")):
+            lines.append(f"사이즈는 보통 {clean_text(reco_context.get('size_tip', ''))} 범위로 보시면 돼요.")
+        lines.append("원하시면 이 상품도 사이즈감 바로 이어서 봐드릴게요.")
+        return "\n".join(lines[:4])
 
     if is_size_question(user_text):
         user_size, size_label = resolve_user_size_for_product(user_text, reco_context, reco_db)
@@ -989,9 +1014,9 @@ def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
         if size_eval["supported"] is False:
             lines.append("편하게 입으시는 기준이면 이 상품보다 조금 더 여유 있는 쪽이 더 안전해요.")
         elif size_eval["supported"] == "edge":
-            lines.append("가능권은 되지만, 완전 편한 느낌을 원하시면 한 단계 더 여유 있는 쪽이 더 나을 수 있어요.")
+            lines.append("딱 못 입는 쪽은 아닌데, 더 편한 쪽을 찾으시면 한 단계 여유 있는 타입이 더 나아요.")
         else:
-            lines.append("지금 기준으로는 추천드려도 무리 없는 편이에요.")
+            lines.append("지금 기준으로는 무리 없이 보셔도 되는 쪽이에요.")
         return "\n".join(lines[:4])
 
     if is_color_question(user_text):
@@ -1032,6 +1057,7 @@ def recommend_products_for_query(user_text: str, current_product: Dict, body_ctx
     bottom_rank = size_rank(body_ctx.get("bottom_size", ""))
     q = clean_text(user_text)
     preferred = [x for x in ["슬랙스", "데님", "청바지", "와이드", "세미와이드", "일자", "블랙", "베이지", "네이비", "아이보리", "단정", "데일리", "여유", "편한"] if x in q]
+    negatives = extract_negative_preferences(user_text)
 
     scored: List[Tuple[int, Dict]] = []
     for _, row in DB.iterrows():
@@ -1042,6 +1068,8 @@ def recommend_products_for_query(user_text: str, current_product: Dict, body_ctx
         blob = row_blob(rowd)
         explicit = f"{clean_text(rowd.get('category', ''))} {clean_text(rowd.get('sub_category', ''))} {clean_text(rowd.get('product_name', ''))}"
         ranks = expand_size_text(clean_text(rowd.get("size_range", "")))
+        if negatives and any(n in explicit or n in blob for n in negatives):
+            continue
 
         if target == "팬츠":
             if not is_bottom_product(rowd):
@@ -1145,7 +1173,7 @@ def build_size_answer(user_text: str, product_context: Dict, db_product: Optiona
         if height_line:
             lines.append(height_line)
         else:
-            lines.append("편하게 입으시는 기준으로도 비교적 안정적인 편이에요.")
+            lines.append("평소 편하게 입으시는 기준으로도 무리 없는 편이에요.")
         return "\n".join(lines[:4])
 
     if size_eval["supported"] == "edge":
@@ -1185,19 +1213,23 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
         return None
     save_recommendations(recos)
     target = infer_target_category_from_query(user_text, current_product)
+    negative_prefs = extract_negative_preferences(user_text)
     lines = [recommendation_intro(target)]
+    if negative_prefs:
+        lines.append(f"말씀하신 {'/'.join(negative_prefs)} 느낌은 빼고 골라봤어요.")
     for i, reco in enumerate(recos, start=1):
-        reason_text = " ".join(reco.get("reasons", [])[:2]).strip()
+        reason_parts = [clean_text(x) for x in reco.get("reasons", []) if clean_text(x)]
+        reason_text = " ".join(reason_parts[:2]).strip()
         if reason_text:
-            lines.append(f"{i}. {reco['product_name']} 추천드려요. {reason_text}")
+            lines.append(f"{i}번은 {reco['product_name']}이에요. {reason_text}")
         else:
-            lines.append(f"{i}. {reco['product_name']} 추천드려요. 전체 분위기가 깔끔하게 이어지기 좋은 쪽이에요.")
+            lines.append(f"{i}번은 {reco['product_name']}이에요. 전체 분위기가 깔끔하게 이어지기 좋은 쪽이에요.")
     if target in ["자켓", "블라우스", "니트", "가디건", "셔츠"] and body_ctx.get("top_size"):
-        lines.append(f"고객님 상의 {body_ctx.get('top_size')} 기준으로 너무 타이트해 보일 쪽은 최대한 빼고 골라봤어요.")
+        lines.append(f"고객님 상의 {body_ctx.get('top_size')} 기준으로 너무 답답해 보일 쪽은 최대한 빼고 봤어요.")
     if target in ["팬츠", "스커트"] and body_ctx.get("bottom_size"):
         lines.append(f"고객님 하의 {body_ctx.get('bottom_size')} 기준으로 부담 적은 쪽 위주로 골라봤어요.")
-    lines.append("마음 가는 번호 말씀해주시면 그 상품 사이즈감도 바로 이어서 봐드릴게요.")
-    return "\n".join(lines[:6])
+    lines.append("마음 가는 번호 말씀해주시면 그 상품 이름이랑 사이즈감 바로 이어서 봐드릴게요.")
+    return "\n".join(lines[:7])
 
 
 def trim_text(text: str, max_len: int = 500) -> str:
@@ -1317,6 +1349,7 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
             build_name_answer(product_context, db_product) if is_name_question(user_text) else None,
             get_fast_policy_answer(user_text),
             build_recommendation_answer(user_text, product_context, db_product),
+            build_recommendation_answer(user_text + " 추천", product_context, db_product) if is_recommendation_list_followup(user_text) else None,
             build_size_answer(user_text, product_context, db_product),
             build_color_answer(product_context, db_product) if is_color_question(user_text) else None,
         ]
