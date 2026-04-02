@@ -62,9 +62,9 @@ SYSTEM_PROMPT = """
 5. 데이터가 부족하면 추측하지 말고 짧고 솔직하게 말한다.
 6. 답변은 3~6문장, 자연스러운 MD 상담체, 먼저 결론부터 말한다.
 7. 메뉴명, 로그인 텍스트, 사이트 네비게이션 같은 잡텍스트를 상품정보로 취급하지 않는다.
-8. 상의 상품에서는 하의 중심 표현(허리, 힙, 허벅지)을 불필요하게 섞지 않는다.
-9. 하의 상품에서는 상의 중심 표현(어깨, 가슴, 팔통)을 불필요하게 섞지 않는다.
-10. 추천 요청이 들어오면 현재 상품 설명을 반복하지 말고 추천 상품만 간단히 정리한다.
+8. 추천 요청이 들어오면 현재 상품 사이즈 설명을 반복하지 말고, 추천 상품 후보만 골라서 답한다.
+9. 상의 상품에서는 허리, 힙, 허벅지 같은 하의 중심 표현을 쓰지 않는다.
+10. 하의 상품에서는 어깨, 가슴, 팔통 같은 상의 중심 표현을 쓰지 않는다.
 """.strip()
 
 
@@ -183,15 +183,15 @@ def write_chat_log(event_type: str, user_text: str = "", answer: str = "", respo
 
 
 def context_uses_top_size(product_context: Dict, db_product: Optional[Dict]) -> bool:
-    name = clean_text((db_product or {}).get("product_name", "")) or clean_text(product_context.get("product_name", ""))
-    category = clean_text((db_product or {}).get("category", "")) or clean_text(product_context.get("category", ""))
-    sub_category = clean_text((db_product or {}).get("sub_category", ""))
-    corpus = f"{name} {category} {sub_category}"
-
-    # 상의 키워드는 최우선 확정
-    if any(k in corpus for k in ["자켓", "재킷", "점퍼", "코트", "셔츠", "블라우스", "니트", "가디건", "맨투맨", "티셔츠", "티", "베스트", "조끼"]):
+    corpus = " ".join([
+        clean_text((db_product or {}).get("category", "")),
+        clean_text((db_product or {}).get("sub_category", "")),
+        clean_text((db_product or {}).get("product_name", "")),
+        clean_text(product_context.get("category", "")),
+        clean_text(product_context.get("product_name", "")),
+    ])
+    if any(k in corpus for k in ["자켓", "재킷", "점퍼", "코트", "셔츠", "블라우스", "니트", "가디건", "맨투맨", "티셔츠", "탑", "조끼", "베스트"]):
         return True
-    # 하의는 그 다음
     if any(k in corpus for k in ["팬츠", "슬랙스", "바지", "데님", "청바지", "스커트", "치마"]):
         return False
     return True
@@ -585,7 +585,7 @@ def evaluate_size_support(user_top: str, product_context: Dict, db_product: Opti
             }
         return {
             "supported": True,
-            "reason": f"현재 페이지 기준으로 {matched['label']} 사이즈 쪽으로 보시면 돼요. {chest_signal.get('reason','').strip()}".strip(),
+            "reason": f"현재 페이지 기준으로 {matched['label']} 사이즈가 고객님 {user_top}을 커버하는 쪽이에요. {chest_signal.get('reason','').strip()}".strip(),
             "matched_option": matched,
             "confidence": "page+measure",
         }
@@ -635,9 +635,6 @@ def evaluate_size_support(user_top: str, product_context: Dict, db_product: Opti
 
 def is_size_question(user_text: str) -> bool:
     q = clean_text(user_text).replace(" ", "")
-    # 추천 요청이 함께 있으면 추천으로 우선 보낸다.
-    if any(k in q for k in ["추천", "다른", "어울리는", "코디", "매치", "같이입", "입고갈"]):
-        return False
     return any(k in q for k in ["사이즈", "맞을까", "맞을까요", "맞아", "핏", "작을까", "클까", "여유", "타이트", "77", "66반", "88"])
 
 
@@ -653,7 +650,12 @@ def is_color_question(user_text: str) -> bool:
 
 def is_recommendation_question(user_text: str) -> bool:
     q = clean_text(user_text)
-    return any(k in q for k in ["추천", "어울리는", "같이 입", "코디", "매치", "무슨 바지", "어떤 바지", "무슨 치마", "잘 어울리는", "다른", "비슷한", "학교에", "행사", "입고갈"])
+    return any(k in q for k in [
+        "추천", "어울리는", "같이 입", "코디", "매치", "무슨 바지", "어떤 바지", "무슨 치마",
+        "잘 어울리는", "다른", "비슷한", "학교에", "행사", "입고갈",
+        "다른 맨투맨", "다른 자켓", "다른 블라우스", "다른 티셔츠", "다른 니트",
+        "맨투맨 추천", "자켓 추천", "블라우스 추천", "티셔츠 추천", "니트 추천",
+    ])
 
 
 def current_product_dict(product_context: Dict, db_product: Optional[Dict]) -> Dict:
@@ -692,9 +694,9 @@ def infer_target_category_from_query(user_text: str, current_product: Dict) -> s
     q = clean_text(user_text)
     if any(k in q for k in ["자켓", "재킷", "아우터"]):
         return "자켓"
-    if any(k in q for k in ["맨투맨"]):
+    if "맨투맨" in q:
         return "맨투맨"
-    if any(k in q for k in ["티셔츠", "티 ", "티추천"]):
+    if any(k in q for k in ["티셔츠", "티 ", "반팔", "긴팔티"]):
         return "티셔츠"
     if any(k in q for k in ["블라우스", "셔츠"]):
         return "블라우스"
@@ -706,16 +708,11 @@ def infer_target_category_from_query(user_text: str, current_product: Dict) -> s
         return "스커트"
     if any(k in q for k in ["바지", "슬랙스", "팬츠", "데님", "청바지"]):
         return "팬츠"
-
     current_cat = clean_text(current_product.get("category", ""))
     current_sub = clean_text(current_product.get("sub_category", ""))
     current_name = clean_text(current_product.get("product_name", ""))
     corpus = f"{current_cat} {current_sub} {current_name}"
-    if any(k in corpus for k in ["맨투맨"]):
-        return "맨투맨"
-    if any(k in corpus for k in ["티셔츠", "티 "]):
-        return "티셔츠"
-    if any(k in corpus for k in ["자켓", "재킷", "아우터", "점퍼", "코트"]):
+    if any(k in corpus for k in ["자켓", "재킷", "아우터", "점퍼", "코트", "맨투맨"]):
         return "팬츠"
     if any(k in corpus for k in BOTTOM_CATS):
         return "블라우스"
@@ -807,6 +804,34 @@ def get_followup_recommendation(user_text: str) -> Optional[Dict]:
         return None
     return recos[idx]
 
+def build_recommended_items_size_summary(user_text: str) -> Optional[str]:
+    q = clean_text(user_text)
+    recos = st.session_state.get("last_recommendations", []) or []
+    if not recos or not is_size_question(user_text):
+        return None
+    if get_recommendation_reference_index(user_text) is not None:
+        return None
+    if not any(k in q for k in ["추천해준", "추천드린", "지금 추천", "방금 추천", "추천한", "그 바지", "그 상품", "그 옷"]):
+        return None
+
+    lines = []
+    for i, reco in enumerate(recos[:3], start=1):
+        reco_context, reco_db = recommendation_to_context(reco)
+        user_size, body_label = get_active_user_size(reco_context, reco_db)
+        if not user_size:
+            continue
+        size_eval = evaluate_size_support(user_size, reco_context, reco_db)
+        name = reco_context["product_name"]
+        if size_eval["supported"] is False:
+            lines.append(f"{i}번 {name}은 고객님 {body_label} {user_size} 기준으로는 조금 타이트하게 느껴질 수 있어요.")
+        elif size_eval["supported"] == "edge":
+            lines.append(f"{i}번 {name}은 고객님 {body_label} {user_size} 기준으로 경계선에 가까운 편이에요.")
+        elif size_eval["supported"] is True:
+            lines.append(f"{i}번 {name}은 고객님 {body_label} {user_size} 기준으로 무리 없는 쪽이에요.")
+    if not lines:
+        return None
+    return "\n".join(lines[:3]) + "\n마음 가는 번호 있으면 그 상품 기준으로 더 자세히 이어서 봐드릴게요 :)"
+
 def recommendation_to_context(reco: Dict) -> Tuple[Dict, Optional[Dict]]:
     rowd = reco.get("_full_row", {}) if isinstance(reco, dict) else {}
     db_like = rowd if rowd else {
@@ -844,6 +869,10 @@ def recommendation_to_context(reco: Dict) -> Tuple[Dict, Optional[Dict]]:
     return context, db_like
 
 def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
+    group_size_answer = build_recommended_items_size_summary(user_text)
+    if group_size_answer:
+        return group_size_answer
+
     reco = get_followup_recommendation(user_text)
     if not reco:
         return None
@@ -942,12 +971,6 @@ def recommend_products_for_query(user_text: str, current_product: Dict, body_ctx
         if target == "자켓":
             if not any(k in explicit for k in ["자켓", "재킷"]):
                 continue
-        elif target == "맨투맨":
-            if "맨투맨" not in explicit:
-                continue
-        elif target == "티셔츠":
-            if not any(k in explicit for k in ["티셔츠", "티 "]):
-                continue
         elif target == "블라우스":
             if not any(k in explicit for k in ["블라우스", "셔츠"]):
                 continue
@@ -956,6 +979,12 @@ def recommend_products_for_query(user_text: str, current_product: Dict, body_ctx
                 continue
         elif target == "니트":
             if "니트" not in explicit:
+                continue
+        elif target == "맨투맨":
+            if "맨투맨" not in explicit:
+                continue
+        elif target == "티셔츠":
+            if not any(k in explicit for k in ["티셔츠", "반팔", "긴팔티"]):
                 continue
         elif target == "스커트":
             if not any(k in explicit for k in ["스커트", "치마"]):
@@ -969,7 +998,7 @@ def recommend_products_for_query(user_text: str, current_product: Dict, body_ctx
             if any(k in explicit for k in ["후드", "집업"]):
                 continue
         if any(k in q for k in ["학교", "행사", "학부모", "상담", "모임"]):
-            if target in ["자켓", "블라우스", "가디건", "니트", "맨투맨", "티셔츠", ""] and any(k in explicit for k in ["후드", "집업", "맨투맨", "점퍼", "야상"]):
+            if any(k in explicit for k in ["후드", "집업", "맨투맨", "점퍼", "야상"]):
                 continue
 
         # size fit filter
@@ -992,10 +1021,6 @@ def recommend_products_for_query(user_text: str, current_product: Dict, body_ctx
             score += len(current_tags & row_tags) * 2
         if any(k in fit for k in ["여유", "루즈", "오버"]):
             score += 3
-        if target == "맨투맨" and "맨투맨" in explicit:
-            score += 10
-        if target == "티셔츠" and any(k in explicit for k in ["티셔츠", "티 "]):
-            score += 10
         if any(k in cover for k in ["팔뚝", "상체", "가슴", "힙", "허리"]):
             score += 2
         if ranks:
@@ -1101,7 +1126,12 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
     recos = recommend_products_for_query(user_text, current_product, body_ctx, limit=3)
     if not recos:
         st.session_state.last_recommendations = []
-        return "지금 조건에 딱 맞는 상품이 바로 많이 잡히진 않아서요. 원하시면 자켓 느낌을 조금 더 단정하게 볼지, 편하게 볼지 기준을 맞춰서 다시 골라드릴게요 :)"
+        target = infer_target_category_from_query(user_text, current_product)
+        if target == "맨투맨":
+            return "지금 조건에 딱 맞게 바로 더 잡히는 맨투맨이 많진 않아요. 원하시면 조금 더 여유핏으로 볼지, 깔끔한 기본핏으로 볼지 기준 맞춰서 다시 골라드릴게요 :)"
+        if target == "팬츠":
+            return "지금 옷이랑 잘 붙는 바지 중에서 바로 더 잡히는 후보가 많진 않아요. 원하시면 슬랙스 쪽으로 볼지, 데님 쪽으로 볼지 기준 맞춰서 다시 골라드릴게요 :)"
+        return "지금 조건에 딱 맞는 상품이 바로 많이 잡히진 않아서요. 원하시면 조금 더 단정하게 볼지, 편하게 볼지 기준을 맞춰서 다시 골라드릴게요 :)"
     save_recommendations(recos)
     prev_seen = list(st.session_state.get("reco_seen_names", []) or [])
     prev_seen.extend([r.get("product_name", "") for r in recos])
@@ -1140,7 +1170,7 @@ def slim_current_context(product_context: Dict, db_product: Optional[Dict], user
     current = current_product_dict(product_context, db_product)
     colors = parse_color_options(product_context, db_product)
     body = build_body_context()
-    active_size, active_label = get_active_user_size(product_context, db_product)
+    active_size, _active_label = get_active_user_size(product_context, db_product)
     size_eval = evaluate_size_support(active_size, product_context, db_product) if active_size else {"supported": None, "reason": ""}
     recos = recommend_products_for_query(user_text, current, body, limit=3) if is_recommendation_question(user_text) else []
     return {
@@ -1151,8 +1181,6 @@ def slim_current_context(product_context: Dict, db_product: Optional[Dict], user
         "confirmed_colors": colors[:8],
         "confirmed_size_support": size_eval.get("supported"),
         "size_support_reason": trim_text(size_eval.get("reason", ""), 220),
-        "active_size_label": active_label,
-        "active_size_value": active_size,
         "body_context": body,
         "page_summary": trim_text(product_context.get("summary", ""), 700),
         "page_fit": trim_text(product_context.get("fit", ""), 260),
