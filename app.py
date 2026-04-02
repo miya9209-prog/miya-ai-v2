@@ -62,6 +62,11 @@ SYSTEM_PROMPT = """
 5. 데이터가 부족하면 추측하지 말고 짧고 솔직하게 말한다.
 6. 답변은 3~6문장, 자연스러운 MD 상담체, 먼저 결론부터 말한다.
 7. 메뉴명, 로그인 텍스트, 사이트 네비게이션 같은 잡텍스트를 상품정보로 취급하지 않는다.
+8. 자켓, 재킷, 점퍼, 코트, 셔츠, 블라우스, 니트, 가디건, 맨투맨, 티셔츠는 상의로 보고 상의 사이즈를 사용한다.
+9. 팬츠, 슬랙스, 바지, 데님, 청바지, 스커트, 치마는 하의로 보고 하의 사이즈를 사용한다.
+10. 상의 상품에서는 허리, 힙, 허벅지 같은 하의 중심 표현을 쓰지 않는다.
+11. 하의 상품에서는 어깨, 가슴, 팔통 같은 상의 중심 표현을 쓰지 않는다.
+12. 추천 요청이 들어오면 현재 상품 설명을 반복하지 말고 allowed_recommendation_candidates 안에서 같은 카테고리만 추천한다.
 """.strip()
 
 
@@ -167,6 +172,7 @@ def write_chat_log(event_type: str, user_text: str = "", answer: str = "", respo
             "error_text": clean_text(error_text),
             "latency_ms": str(latency_ms),
             "answer": clean_text(answer),
+            "detected_size_type": "top" if context_uses_top_size(product_context or {}, get_db_product(clean_text((product_context or {}).get("product_no", ""))) if product_context else None) else "bottom",
         }
         import csv
         exists = os.path.exists(log_path)
@@ -180,17 +186,16 @@ def write_chat_log(event_type: str, user_text: str = "", answer: str = "", respo
 
 
 def context_uses_top_size(product_context: Dict, db_product: Optional[Dict]) -> bool:
-    corpus = " ".join([
-        clean_text((db_product or {}).get("category", "")),
-        clean_text((db_product or {}).get("sub_category", "")),
-        clean_text((db_product or {}).get("product_name", "")),
-        clean_text(product_context.get("category", "")),
-        clean_text(product_context.get("product_name", "")),
-    ])
+    name = clean_text((db_product or {}).get("product_name", "")) or clean_text(product_context.get("product_name", ""))
+    category = clean_text((db_product or {}).get("category", "")) or clean_text(product_context.get("category", ""))
+    sub_category = clean_text((db_product or {}).get("sub_category", ""))
+    corpus = f"{name} {category} {sub_category}"
+
+    if any(k in corpus for k in ["자켓", "재킷", "점퍼", "코트", "셔츠", "블라우스", "니트", "가디건", "맨투맨", "티셔츠", "베스트", "조끼"]):
+        return True
     if any(k in corpus for k in ["팬츠", "슬랙스", "바지", "데님", "청바지", "스커트", "치마"]):
         return False
     return True
-
 
 def get_active_user_size(product_context: Dict, db_product: Optional[Dict]) -> Tuple[str, str]:
     body = build_body_context()
@@ -580,7 +585,7 @@ def evaluate_size_support(user_top: str, product_context: Dict, db_product: Opti
             }
         return {
             "supported": True,
-            "reason": f"현재 페이지 기준으로 {matched['label']} 사이즈가 고객님 {body_label} {user_size}을 커버해요. {chest_signal.get('reason','').strip()}".strip(),
+            "reason": f"현재 페이지 기준으로 {matched['label']} 사이즈가 권장 범위 안쪽에 있어요. {chest_signal.get('reason','').strip()}".strip(),
             "matched_option": matched,
             "confidence": "page+measure",
         }
@@ -612,7 +617,7 @@ def evaluate_size_support(user_top: str, product_context: Dict, db_product: Opti
             }
         return {
             "supported": True,
-            "reason": f"DB 기준으로는 고객님 {body_label} {user_size}이 권장 범위 안에 있어요. {chest_signal.get('reason','').strip()}".strip(),
+            "reason": f"권장 범위 안쪽으로 보여요. {chest_signal.get('reason','').strip()}".strip(),
             "matched_option": None,
             "confidence": "db+measure",
         }
@@ -1108,7 +1113,8 @@ def slim_current_context(product_context: Dict, db_product: Optional[Dict], user
     current = current_product_dict(product_context, db_product)
     colors = parse_color_options(product_context, db_product)
     body = build_body_context()
-    size_eval = evaluate_size_support(clean_text(body.get("top_size", "")), product_context, db_product) if body.get("top_size") else {"supported": None, "reason": ""}
+    active_size, _active_label = get_active_user_size(product_context, db_product)
+    size_eval = evaluate_size_support(active_size, product_context, db_product) if active_size else {"supported": None, "reason": ""}
     recos = recommend_products_for_query(user_text, current, body, limit=3) if is_recommendation_question(user_text) else []
     return {
         "current_product_name": current.get("product_name") or "지금 보시는 상품",
