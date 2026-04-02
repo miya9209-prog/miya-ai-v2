@@ -14,6 +14,9 @@ from bs4 import BeautifulSoup
 
 st.set_page_config(page_title="미야언니", layout="centered", initial_sidebar_state="collapsed")
 
+# =========================================================
+# 상태 초기화
+# =========================================================
 def ensure_state() -> None:
     defaults = {
         "messages": [],
@@ -34,6 +37,9 @@ def ensure_state() -> None:
 
 ensure_state()
 
+# =========================================================
+# 공통 유틸
+# =========================================================
 SIZE_ORDER = {"44": 1, "55": 2, "55반": 3, "66": 4, "66반": 5, "77": 6, "77반": 7, "88": 8, "99": 9}
 SIZE_LABELS = {v: k for k, v in SIZE_ORDER.items()}
 TOP_KEYWORDS = ["자켓", "재킷", "점퍼", "코트", "블라우스", "셔츠", "니트", "가디건", "맨투맨", "티셔츠", "후드", "조끼", "베스트"]
@@ -104,21 +110,21 @@ def sanitize_product_name(name: str) -> str:
 
 def detect_category_from_name(name: str, raw_text: str = "") -> str:
     corpus = f"{clean_text(name)} {clean_text(raw_text)}"
-    if any(k in corpus for k in ["블라우스"]):
+    if "블라우스" in corpus:
         return "블라우스"
-    if any(k in corpus for k in ["셔츠"]):
+    if "셔츠" in corpus:
         return "셔츠"
-    if any(k in corpus for k in ["맨투맨"]):
+    if "맨투맨" in corpus:
         return "맨투맨"
-    if any(k in corpus for k in ["티셔츠", "티"]):
+    if "티셔츠" in corpus or "티 " in corpus:
         return "티셔츠"
-    if any(k in corpus for k in ["니트", "가디건"]):
+    if "니트" in corpus or "가디건" in corpus:
         return "니트"
     if any(k in corpus for k in ["자켓", "재킷", "점퍼", "코트", "베스트", "조끼"]):
         return "자켓"
     if any(k in corpus for k in ["팬츠", "슬랙스", "바지", "데님", "청바지"]):
         return "팬츠"
-    if any(k in corpus for k in ["스커트", "치마"]):
+    if "스커트" in corpus or "치마" in corpus:
         return "스커트"
     return "기타"
 
@@ -142,6 +148,9 @@ def get_active_user_size(product_context: Dict, db_product: Optional[Dict]) -> T
         return clean_text(body.get("top_size", "")), "상의"
     return clean_text(body.get("bottom_size", "")), "하의"
 
+# =========================================================
+# 로그
+# =========================================================
 def ensure_logs_dir() -> str:
     path = "logs"
     os.makedirs(path, exist_ok=True)
@@ -188,12 +197,14 @@ def write_chat_log(
     except Exception:
         pass
 
+# =========================================================
+# DB
+# =========================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def load_product_db():
     path = "misharp_miya_db.csv"
     if not os.path.exists(path):
         return []
-    rows = []
     try:
         import pandas as pd
         df = pd.read_csv(path)
@@ -202,10 +213,9 @@ def load_product_db():
             df[c] = df[c].fillna("").astype(str).map(clean_text)
         if "product_no" in df.columns:
             df["product_no"] = df["product_no"].map(normalize_product_no)
-        rows = df.to_dict(orient="records")
+        return df.to_dict(orient="records")
     except Exception:
         return []
-    return rows
 
 DB_ROWS = load_product_db()
 
@@ -218,6 +228,9 @@ def get_db_product(product_no_value: str) -> Optional[Dict]:
             return row
     return None
 
+# =========================================================
+# 페이지 컨텍스트
+# =========================================================
 def extract_meta_name(soup: BeautifulSoup) -> str:
     candidates = []
     for selector in [
@@ -241,9 +254,7 @@ def split_detail_sections(text: str) -> Dict[str, str]:
     t = clean_text(text)
     if not t:
         return {"summary": "", "material": "", "fit": "", "size_tip": ""}
-    material = []
-    fit = []
-    size_tip = []
+    material, fit, size_tip = [], [], []
     for sentence in re.split(r"(?<=[.!?])\s+|\s*/\s*", t):
         s = clean_text(sentence)
         if not s:
@@ -288,10 +299,7 @@ def fetch_product_context(url: str, passed_name: str = "", passed_product_no: st
     product_name = safe_name or extract_meta_name(soup)
     for t in soup(["script", "style", "noscript", "header", "footer"]):
         t.decompose()
-    raw_text = soup.get_text("\n")
-    raw_text = raw_text.replace("\r", "\n")
-    raw_text = re.sub(r"\n{2,}", "\n", raw_text)
-    raw_text = clean_text(raw_text)
+    raw_text = clean_text(re.sub(r"\n{2,}", "\n", soup.get_text("\n").replace("\r", "\n")))
     sections = split_detail_sections(raw_text)
     db_row = get_db_product(safe_no)
     if db_row and clean_text(db_row.get("product_name")):
@@ -310,6 +318,9 @@ def fetch_product_context(url: str, passed_name: str = "", passed_product_no: st
         "raw_excerpt": raw_text[:3000],
     }
 
+# =========================================================
+# 상담 로직
+# =========================================================
 def is_size_question(user_text: str) -> bool:
     q = clean_text(user_text).replace(" ", "")
     return any(k in q for k in ["사이즈", "맞을까", "맞을까요", "맞아", "핏", "작을까", "클까", "여유", "타이트", "77", "66반", "88"])
@@ -348,12 +359,10 @@ def evaluate_size_support(user_size: str, body_label: str, product_context: Dict
         clean_text((product_context or {}).get("fit", "")),
         clean_text((db_product or {}).get("fit_type", "")),
     ]
-    min_rank = None
     max_rank = None
     for src in text_sources:
-        lo, hi = parse_range_from_text(src)
-        if lo and hi:
-            min_rank = lo if min_rank is None else min(min_rank, lo)
+        _, hi = parse_range_from_text(src)
+        if hi:
             max_rank = hi if max_rank is None else max(max_rank, hi)
     fit_corpus = " ".join(text_sources)
     has_loose = any(k in fit_corpus for k in ["루즈", "여유", "오버", "벌룬"])
@@ -363,10 +372,7 @@ def evaluate_size_support(user_size: str, body_label: str, product_context: Dict
             return {"supported": False, "reason": f"최대 {rank_to_size(max_rank)} 정도까지로 보여서 고객님 {body_label} {user_size} 기준으로는 살짝 타이트하게 느껴질 수 있어요.", "confidence": "range"}
         if rank == max_rank:
             msg = f"고객님 {body_label} {user_size} 기준이면 경계선에 가까운 쪽이에요."
-            if has_loose:
-                msg += " 그래도 루즈한 느낌이 있어서 아주 답답한 타입은 아니에요."
-            else:
-                msg += " 편하게 입으시는 스타일이면 조금 더 여유 있는 쪽이 더 나아요."
+            msg += " 그래도 루즈한 느낌이 있어서 아주 답답한 타입은 아니에요." if has_loose else " 편하게 입으시는 스타일이면 조금 더 여유 있는 쪽이 더 나아요."
             return {"supported": "edge", "reason": msg, "confidence": "range"}
         if has_regular and rank >= max_rank - 1:
             return {"supported": "edge", "reason": f"고객님 {body_label} {user_size} 기준으로는 입으실 수는 있는데, 넉넉한 핏보다는 깔끔하게 맞는 쪽에 더 가까워요.", "confidence": "fit"}
@@ -375,7 +381,7 @@ def evaluate_size_support(user_size: str, body_label: str, product_context: Dict
         return {"supported": True, "reason": f"지금 보이는 정보로는 루즈한 쪽이라 고객님 {body_label} {user_size} 기준으로 크게 답답한 타입은 아닐 것 같아요.", "confidence": "fit"}
     if has_regular:
         return {"supported": "edge", "reason": f"지금 보이는 정보로는 정핏에 가까워서 고객님 {body_label} {user_size} 기준으로는 살짝 또렷하게 느껴질 수 있어요.", "confidence": "fit"}
-    return {"supported": None, "reason": f"지금 정보만으로는 딱 잘라 말씀드리긴 어렵지만, 편하게 입으시는 기준이면 비슷한 핏의 다른 상품도 같이 보는 쪽이 더 좋아요.", "confidence": "unknown"}
+    return {"supported": None, "reason": "지금 정보만으로는 딱 잘라 말씀드리긴 어렵지만, 편하게 입으시는 기준이면 비슷한 핏의 다른 상품도 같이 보는 쪽이 더 좋아요.", "confidence": "unknown"}
 
 def build_size_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
     user_size, body_label = get_active_user_size(product_context, db_product)
@@ -383,25 +389,17 @@ def build_size_answer(user_text: str, product_context: Dict, db_product: Optiona
     if not user_size:
         return "사이즈 같이 봐드릴게요 :) 상의랑 하의 사이즈 먼저 알려주시면 더 정확하게 말씀드릴 수 있어요."
     result = evaluate_size_support(user_size, body_label, product_context, db_product)
-    reason = result.get("reason", "")
     q = clean_text(user_text)
-    extra = []
-    if context_uses_top_size(product_context, db_product):
-        if "상체" in q:
-            extra.append("상체가 있는 편이라고 하셔서 어깨나 가슴 쪽은 조금 더 또렷하게 느껴지실 수 있어요.")
-        if "키가 작" in q:
-            extra.append("기장은 아주 과하게 길어 보이는 타입은 아닌지 같이 보면 더 좋아요.")
-    answer_parts = [f"고객님 {body_label} {user_size} 기준으로 보면 {product_name}은 {reason}"]
-    for x in extra[:1]:
-        if x not in " ".join(answer_parts):
-            answer_parts.append(x)
+    parts = [f"고객님 {body_label} {user_size} 기준으로 보면 {product_name}은 {result.get('reason','무리 없는 쪽으로 보여요.')}"]
+    if context_uses_top_size(product_context, db_product) and "상체" in q:
+        parts.append("상체가 있는 편이라고 하셔서 어깨나 가슴 쪽은 조금 더 또렷하게 느껴지실 수 있어요.")
     if result.get("supported") is False:
-        answer_parts.append("평소 딱 맞게 입는 것보다 조금 편한 핏을 좋아하시면, 한 단계 더 여유 있는 쪽을 같이 보는 게 나아요.")
+        parts.append("평소 딱 맞게 입는 것보다 조금 편한 핏을 좋아하시면, 한 단계 더 여유 있는 쪽을 같이 보는 게 나아요.")
     elif result.get("supported") == "edge":
-        answer_parts.append("입으실 수는 있는데, 편하게 입는 기준이면 조금 더 여유 있는 쪽이 더 안정적이에요.")
+        parts.append("입으실 수는 있는데, 편하게 입는 기준이면 조금 더 여유 있는 쪽이 더 안정적이에요.")
     else:
-        answer_parts.append("전체적으로는 무리 없는 쪽으로 보여요.")
-    return " ".join(answer_parts)
+        parts.append("전체적으로는 무리 없는 쪽으로 보여요.")
+    return " ".join(parts)
 
 def infer_target_category_from_query(user_text: str, current_product: Dict) -> str:
     q = clean_text(user_text)
@@ -419,7 +417,7 @@ def infer_target_category_from_query(user_text: str, current_product: Dict) -> s
         return "팬츠"
     if any(k in q for k in ["스커트", "치마"]):
         return "스커트"
-    if "이 옷에 어울리는 바지" in q or "어울리는 바지" in q:
+    if "어울리는 바지" in q:
         return "팬츠"
     current_cat = clean_text(current_product.get("category", ""))
     if current_cat in ["자켓", "블라우스", "셔츠", "니트", "맨투맨", "티셔츠"]:
@@ -448,7 +446,7 @@ def row_matches_target(rowd: Dict, target_cat: str) -> bool:
         return any(k in corpus for k in ["스커트", "치마"])
     return False
 
-def item_supports_user(rowd: Dict, target_cat: str, product_context: Dict) -> bool:
+def item_supports_user(rowd: Dict, target_cat: str) -> bool:
     temp_ctx = {
         "product_name": clean_text(rowd.get("product_name", "")),
         "category": clean_text(rowd.get("sub_category", "") or rowd.get("category", "") or target_cat),
@@ -478,7 +476,7 @@ def build_reason(rowd: Dict, user_text: str, target_cat: str) -> str:
             reasons.append("상체가 있는 편이어도 답답한 느낌이 덜한 편이에요")
         else:
             reasons.append("얼굴 쪽이 답답해 보이지 않고 단정하게 받쳐주기 좋아요")
-    if any(k in corpus for k in ["커버", "부해", "복부", "힙", "실루엣"]):
+    if any(k in corpus for k in ["커버", "부해", "실루엣"]):
         reasons.append("전체 실루엣이 부해 보이지 않게 잡아주는 편이에요")
     return " ".join(reasons[:2]).strip() or "지금 체형 기준으로도 무리 없이 보기 좋은 쪽이에요"
 
@@ -494,6 +492,7 @@ def recommend_products(user_text: str, product_context: Dict, db_product: Option
 
     candidates = []
     seen_names = set(st.session_state.get("reco_seen_names", []))
+    q = clean_text(user_text)
 
     for row in DB_ROWS:
         name = clean_text(row.get("product_name", ""))
@@ -505,11 +504,10 @@ def recommend_products(user_text: str, product_context: Dict, db_product: Option
             continue
         if name in seen_names:
             continue
-        q = clean_text(user_text)
         if any(k in q for k in ["학교", "행사", "학부모", "모임", "상담"]):
             if any(k in name for k in ["후드", "쭈리", "트레이닝"]):
                 continue
-        if not item_supports_user(row, target_cat, product_context):
+        if not item_supports_user(row, target_cat):
             continue
         candidates.append(row)
 
@@ -524,17 +522,12 @@ def recommend_products(user_text: str, product_context: Dict, db_product: Option
                 continue
             if row in candidates:
                 continue
-            q = clean_text(user_text)
-            if any(k in q for k in ["학교", "행사", "학부모", "모임", "상담"]):
-                if any(k in name for k in ["후드", "쭈리", "트레이닝"]):
-                    continue
             candidates.append(row)
             if len(candidates) >= 3:
                 break
 
     if not candidates:
-        kind_text = target_cat
-        return f"지금 조건에 딱 맞는 {kind_text}가 바로 많이 잡히진 않아서요. 원하시면 조금 더 단정하게 볼지, 편하게 볼지 기준을 맞춰서 다시 골라드릴게요 :)"
+        return f"지금 조건에 딱 맞는 {target_cat}가 바로 많이 잡히진 않아서요. 원하시면 조금 더 단정하게 볼지, 편하게 볼지 기준을 맞춰서 다시 골라드릴게요 :)"
 
     picked = candidates[:3]
     st.session_state.last_recommendations = picked
@@ -551,7 +544,6 @@ def recommend_products(user_text: str, product_context: Dict, db_product: Option
         "팬츠": "네, 지금 옷이랑 잘 이어입기 좋은 바지로 먼저 골라드릴게요.",
         "스커트": "네, 지금 옷이랑 잘 이어입기 좋은 스커트로 먼저 골라드릴게요.",
     }.get(target_cat, "네, 같이 보기 좋은 상품으로 먼저 골라드릴게요.")
-
     lines = [prefix]
     for i, row in enumerate(picked, start=1):
         lines.append(f"{i}. {clean_text(row.get('product_name',''))} — {build_reason(row, user_text, target_cat)}")
@@ -575,7 +567,7 @@ def is_followup_size_on_recommendations(user_text: str) -> bool:
     q = clean_text(user_text)
     return bool(st.session_state.get("last_recommendations")) and (
         ("추천해준" in q and any(k in q for k in ["사이즈", "맞아", "맞을까", "괜찮아"])) or
-        any(k in q for k in ["그거", "그 상품", "1번", "2번", "3번", "첫 번째", "두 번째", "세 번째"]) and any(k in q for k in ["사이즈", "맞아", "맞을까", "괜찮아"])
+        (any(k in q for k in ["그거", "그 상품", "1번", "2번", "3번", "첫 번째", "두 번째", "세 번째"]) and any(k in q for k in ["사이즈", "맞아", "맞을까", "괜찮아"]))
     )
 
 def build_reco_followup_size_answer(user_text: str) -> str:
@@ -656,6 +648,9 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
         write_chat_log("error", user_text=user_text, answer=answer, response_mode="error", error_text=str(e), latency_ms=int((time.time()-started)*1000), product_context=product_context)
         return answer
 
+# =========================================================
+# 쿼리 / 컨텍스트
+# =========================================================
 params = st.query_params
 current_url = clean_text(params.get("url", ""))
 passed_product_name = clean_text(params.get("pname", ""))
@@ -672,6 +667,9 @@ if context_key != st.session_state.get("last_context_key", ""):
     st.session_state.last_reco_target = ""
     st.session_state.last_reco_kind = ""
 
+# =========================================================
+# UI / CSS
+# =========================================================
 st.markdown("""
 <style>
 header[data-testid="stHeader"] {display:none;}
@@ -679,13 +677,17 @@ div[data-testid="stToolbar"] {display:none;}
 #MainMenu {visibility:hidden;}
 footer {visibility:hidden;}
 .block-container{max-width:760px;padding-top:0.22rem !important;padding-bottom:11.0rem !important;}
-:root{--miya-accent:#0f6a63;--miya-title:#303443;--miya-sub:#5f6471;--miya-muted:#8f94a3;--miya-divider:#ccccd2;--miya-bot-bg:#071b4e;--miya-user-bg:#dff0ec;--miya-user-text:#1f3b36;--miya-page-bg:#f6f7fb;}
+:root{
+  --miya-accent:#0f6a63;--miya-title:#303443;--miya-sub:#5f6471;--miya-muted:#8f94a3;
+  --miya-divider:#ccccd2;--miya-bot-bg:#071b4e;--miya-user-bg:#dff0ec;--miya-user-text:#1f3b36;
+  --miya-page-bg:#f6f7fb;
+}
 html, body, [data-testid="stAppViewContainer"], [data-testid="stMainBlockContainer"] {color: var(--miya-title);background: var(--miya-page-bg) !important;}
 [data-testid="stAppViewContainer"] > .main {background: var(--miya-page-bg) !important;}
 .block-container{background: var(--miya-page-bg) !important;}
 div[data-testid="stTextInput"] label,div[data-testid="stSelectbox"] label{color:var(--miya-title)!important;font-weight:700!important;font-size:11.5px!important;}
 div[data-testid="stTextInput"] input,div[data-baseweb="select"] > div{border-radius:12px!important;}
-hr{margin-top:4px!important;margin-bottom:4px!important;border-color:var(--miya-divider)!important;}
+hr{margin-top:4px!important;margin-bottom:10px!important;border-color:var(--miya-divider)!important;}
 div[data-testid="stChatInput"]{position:fixed!important;left:50%!important;transform:translateX(-50%)!important;bottom:68px!important;width:min(720px, calc(100% - 24px))!important;z-index:9999!important;background:transparent!important;}
 div[data-testid="stChatInput"] > div{background:transparent!important;border-radius:0!important;padding:0!important;box-shadow:none!important;border:none!important;}
 div[data-testid="stChatInput"] textarea {background:#1f2740!important;color:#ffffff!important;caret-color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;font-size:16px!important;line-height:1.35!important;padding-top:12px!important;padding-bottom:12px!important;}
@@ -694,12 +696,25 @@ div[data-testid="stChatInput"] [data-baseweb="textarea"] {background:#1f2740!imp
 div[data-testid="stChatInput"] [data-baseweb="textarea"] > div {background:transparent!important;display:flex!important;align-items:center!important;}
 div[data-testid="stChatInput"] button {background:#2f3a5f!important;color:#ffffff!important;border-radius:14px!important;}
 div[data-testid="stChatInput"] button svg {fill:#ffffff!important;}
-[data-testid="stChatMessage"] {background:transparent !important;}
+.miya-chat-wrap{padding-bottom:90px;}
+.miya-row{display:flex; margin:0 0 16px 0; width:100%;}
+.miya-row.assistant{justify-content:flex-start;}
+.miya-row.user{justify-content:flex-end;}
+.miya-msgbox{max-width:82%;}
+.miya-label{font-size:12px; color:#6d7383; font-weight:700; margin-bottom:6px;}
+.miya-row.user .miya-label{text-align:right;}
+.miya-bubble{
+  padding:12px 14px; border-radius:16px; line-height:1.58; font-size:15px; word-break:keep-all;
+  box-shadow:none; white-space:pre-wrap;
+}
+.miya-row.assistant .miya-bubble{background:var(--miya-bot-bg); color:#ffffff; border-top-left-radius:8px;}
+.miya-row.user .miya-bubble{background:var(--miya-user-bg); color:var(--miya-user-text); border-top-right-radius:8px;}
 @media (max-width: 768px){
   .block-container{max-width:100%;padding-top:0.14rem!important;padding-bottom:11.6rem!important;}
   div[data-testid="stHorizontalBlock"]{gap:6px!important;}
   div[data-testid="stHorizontalBlock"] > div{flex:1 1 0!important;min-width:0!important;}
   div[data-testid="stChatInput"]{bottom:64px!important;width:calc(100% - 16px)!important;}
+  .miya-msgbox{max-width:88%;}
 }
 </style>
 """, unsafe_allow_html=True)
@@ -769,11 +784,26 @@ if not st.session_state.messages:
         )
     st.session_state.messages.append({"role": "assistant", "content": welcome})
 
+def render_message(role: str, content: str):
+    role_class = "assistant" if role == "assistant" else "user"
+    label = "미야언니" if role == "assistant" else "고객님"
+    safe_content = html.escape(content).replace("\n", "<br>")
+    st.markdown(
+        f"""
+        <div class="miya-row {role_class}">
+          <div class="miya-msgbox">
+            <div class="miya-label">{label}</div>
+            <div class="miya-bubble">{safe_content}</div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+st.markdown('<div class="miya-chat-wrap">', unsafe_allow_html=True)
 for msg in st.session_state.messages:
-    role = msg.get("role", "assistant")
-    content = msg.get("content", "")
-    with st.chat_message(role):
-        st.markdown(content)
+    render_message(msg.get("role", "assistant"), msg.get("content", ""))
+st.markdown('</div>', unsafe_allow_html=True)
 
 user_input = st.chat_input("메시지를 입력하세요...")
 
