@@ -30,6 +30,7 @@ def ensure_state() -> None:
         "reco_seen_names": [],
         "last_reco_target": "",
         "last_reco_type": "",
+        "last_selected_index": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -45,7 +46,6 @@ SIZE_LABELS = {v: k for k, v in SIZE_ORDER.items()}
 
 TOP_KEYWORDS = ["자켓", "재킷", "점퍼", "코트", "블라우스", "셔츠", "니트", "가디건", "맨투맨", "티셔츠", "후드", "조끼", "베스트"]
 BOTTOM_KEYWORDS = ["팬츠", "슬랙스", "바지", "데님", "청바지", "스커트", "치마", "레깅스"]
-
 ACCESSORY_WORDS = ["플랫", "슈즈", "슬링백", "샌들", "힐", "로퍼", "부츠", "백", "가방", "귀걸이", "목걸이", "벨트"]
 
 def clean_text(value) -> str:
@@ -269,7 +269,6 @@ def fetch_product_context(url: str, passed_name: str = "", passed_product_no: st
         r.raise_for_status()
     except Exception:
         return fallback_ctx
-
     soup = BeautifulSoup(r.text, "html.parser")
     product_name = safe_name or extract_meta_name(soup)
     for t in soup(["script", "style", "noscript", "header", "footer"]):
@@ -282,16 +281,7 @@ def fetch_product_context(url: str, passed_name: str = "", passed_product_no: st
     if not product_name:
         product_name = "지금 보시는 상품"
     category = detect_category_from_name(product_name, raw_text)
-    return {
-        "product_no": safe_no,
-        "product_name": product_name,
-        "category": category,
-        "summary": sections["summary"],
-        "material": sections["material"],
-        "fit": sections["fit"],
-        "size_tip": sections["size_tip"],
-        "raw_excerpt": raw_text[:3000],
-    }
+    return {"product_no": safe_no, "product_name": product_name, "category": category, "summary": sections["summary"], "material": sections["material"], "fit": sections["fit"], "size_tip": sections["size_tip"], "raw_excerpt": raw_text[:3000]}
 
 # =========================================================
 # 질문 판별
@@ -315,6 +305,10 @@ def is_name_question(user_text: str) -> bool:
 def is_coordi_request(user_text: str) -> bool:
     q = clean_text(user_text)
     return any(k in q for k in ["코디", "학교방문", "학교 방문", "행사룩", "모임룩", "학부모", "뭐 입"])
+
+def is_detail_request(user_text: str) -> bool:
+    q = clean_text(user_text)
+    return any(k in q for k in ["전체적으로", "자세히", "설명", "얘기해줘", "좀 더", "어때", "괜찮아", "어울려", "핏", "코디", "사이즈", "다 같이 봐줘", "다같이 봐줘"])
 
 # =========================================================
 # 사이즈 상담
@@ -543,6 +537,7 @@ def recommend_products(user_text: str, product_context: Dict, db_product: Option
     st.session_state.last_recommendations = picked
     st.session_state.reco_seen_names.extend([clean_text(x.get("product_name", "")) for x in picked])
     st.session_state.last_reco_target = target_cat
+    st.session_state.last_selected_index = None
 
     prefix = {
         "니트티": "네, 고객님 쪽에 잘 맞을 만한 니트티로 먼저 골라드릴게요.",
@@ -579,8 +574,12 @@ def build_school_visit_coordi_answer(user_text: str, product_context: Dict, db_p
     lines.append("마음 가는 번호 말씀해주시면 그 상품 기준으로 사이즈감도 바로 이어서 봐드릴게요 :)")
     st.session_state.last_recommendations = (outer_candidates + bottom_candidates)[:3]
     st.session_state.last_reco_target = "코디"
+    st.session_state.last_selected_index = None
     return "\n".join(lines)
 
+# =========================================================
+# 선택 상품 상세 설명
+# =========================================================
 def extract_selected_index(user_text: str) -> Optional[int]:
     q = clean_text(user_text)
     m = re.search(r"([123])번", q)
@@ -593,6 +592,55 @@ def extract_selected_index(user_text: str) -> Optional[int]:
     if "세 번째" in q or "세번째" in q:
         return 2
     return None
+
+def update_selected_index_from_message(user_text: str) -> None:
+    idx = extract_selected_index(user_text)
+    if idx is not None:
+        st.session_state.last_selected_index = idx
+
+def build_selected_item_detail_answer(user_text: str) -> str:
+    recos = st.session_state.get("last_recommendations", [])
+    idx = extract_selected_index(user_text)
+    if idx is None:
+        idx = st.session_state.get("last_selected_index", None)
+
+    if idx is None or idx >= len(recos):
+        return "지금 보고 있는 상품 번호를 한 번만 더 말씀해주시면 바로 이어서 자세히 봐드릴게요 :)"
+
+    st.session_state.last_selected_index = idx
+    row = recos[idx]
+    name = clean_text(row.get("product_name", ""))
+    target_cat = normalized_row_category(row)
+    temp_ctx = {
+        "product_name": name,
+        "category": target_cat,
+        "summary": clean_text(row.get("product_summary", "")),
+        "fit": clean_text(row.get("fit_type", "")),
+        "size_tip": clean_text(row.get("size_range", "")),
+    }
+    user_size, body_label = get_active_user_size(temp_ctx, row)
+    size_result = evaluate_size_support(user_size, body_label, temp_ctx, row)
+
+    fit_text = clean_text(row.get("fit_type", ""))
+    fit_msg = "전체적으로 과하게 크거나 작지 않은 무난한 핏이에요."
+    if any(k in fit_text for k in ["루즈", "여유", "오버"]):
+        fit_msg = "루즈한 쪽이라 편하게 입기는 좋은데, 상체가 있는 편이면 조금 더 크게 느껴질 수 있어요."
+    elif any(k in fit_text for k in ["슬림", "정핏"]):
+        fit_msg = "라인이 정리돼 보이는 대신 여유가 많은 타입은 아니에요."
+
+    coordi_msg = "슬랙스나 단정한 팬츠 쪽이랑 같이 입으시면 전체가 깔끔하게 정리돼 보여요."
+    if target_cat in ["자켓", "셔츠", "블라우스", "니트", "니트티", "맨투맨", "티셔츠"]:
+        coordi_msg = "슬랙스나 일자 팬츠 쪽이랑 같이 입으시면 단정하게 정리돼 보여요."
+    elif target_cat in ["팬츠", "스커트"]:
+        coordi_msg = "상의는 너무 부한 것보다 깔끔한 셔츠나 니트 쪽이 더 잘 어울려요."
+
+    parts = [
+        f"{idx+1}번 {name} 기준으로 보면,",
+        f"고객님 {body_label} {user_size} 기준으로는 {size_result.get('reason', '무리 없는 쪽이에요.')}",
+        fit_msg,
+        coordi_msg,
+    ]
+    return " ".join(parts)
 
 def is_followup_size_on_recommendations(user_text: str) -> bool:
     q = clean_text(user_text)
@@ -608,6 +656,7 @@ def build_reco_followup_size_answer(user_text: str) -> str:
     idx = extract_selected_index(user_text)
     if idx is not None and 0 <= idx < len(recos):
         row = recos[idx]
+        st.session_state.last_selected_index = idx
         temp_ctx = {
             "product_name": clean_text(row.get("product_name", "")),
             "category": normalized_row_category(row),
@@ -650,11 +699,18 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
         q = clean_text(user_text)
         if not q:
             return ""
+
+        update_selected_index_from_message(q)
+
         if is_pure_greeting(q):
             return "안녕하세요 :) 지금 보시는 상품 같이 봐드릴게요. 사이즈가 궁금하신지, 코디가 궁금하신지 편하게 말씀 주세요."
         if is_followup_size_on_recommendations(q):
             answer = build_reco_followup_size_answer(q)
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_reco_followup", latency_ms=int((time.time()-started)*1000), product_context=product_context)
+            return answer
+        if is_detail_request(q) and st.session_state.get("last_recommendations"):
+            answer = build_selected_item_detail_answer(q)
+            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_selected_detail", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
         if is_name_question(q):
             name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품")
@@ -702,6 +758,7 @@ if context_key != st.session_state.get("last_context_key", ""):
     st.session_state.last_recommendations = []
     st.session_state.reco_seen_names = []
     st.session_state.last_reco_target = ""
+    st.session_state.last_selected_index = None
 
 # =========================================================
 # UI
