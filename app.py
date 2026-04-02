@@ -530,7 +530,7 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
             answer = build_size_answer(q, product_context, db_product)
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_size", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
-        answer = "같이 봐드릴게요 :) 사이즈, 코디, 배송, 교환 중에 어떤 부분부터 같이 볼까요?"
+        answer = "안녕하세요 :) 지금 보시는 상품 같이 봐드릴게요. 사이즈가 궁금하신지, 코디가 궁금하신지 편하게 말씀 주세요."
         write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="fallback", fallback_reason="generic", latency_ms=int((time.time()-started)*1000), product_context=product_context)
         return answer
     except Exception as e:
@@ -560,7 +560,7 @@ header[data-testid="stHeader"] {display:none;}
 div[data-testid="stToolbar"] {display:none;}
 #MainMenu {visibility:hidden;}
 footer {visibility:hidden;}
-.block-container{max-width:760px;padding-top:0.05rem !important;padding-bottom:6.5rem !important;}
+.block-container{max-width:760px;padding-top:0.02rem !important;padding-bottom:6.2rem !important;}
 :root{
   --miya-accent:#0f6a63;--miya-title:#303443;--miya-sub:#5f6471;--miya-muted:#8f94a3;
   --miya-divider:#ccccd2;--miya-bot-bg:#071b4e;--miya-user-bg:#dff0ec;--miya-user-text:#1f3b36;
@@ -571,7 +571,7 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stMainBlockContain
 .block-container{background: var(--miya-page-bg) !important;}
 div[data-testid="stTextInput"] label,div[data-testid="stSelectbox"] label{color:var(--miya-title)!important;font-weight:700!important;font-size:11.5px!important;}
 div[data-testid="stTextInput"] input,div[data-baseweb="select"] > div{border-radius:12px!important;}
-hr{margin-top:2px!important;margin-bottom:4px!important;border-color:var(--miya-divider)!important;}
+hr{margin-top:0!important;margin-bottom:0!important;border-color:var(--miya-divider)!important;}
 div[data-testid="stChatInput"]{position:fixed!important;left:50%!important;transform:translateX(-50%)!important;bottom:68px!important;width:min(720px, calc(100% - 24px))!important;z-index:9999!important;background:transparent!important;}
 div[data-testid="stChatInput"] > div{background:transparent!important;border-radius:0!important;padding:0!important;box-shadow:none!important;border:none!important;}
 div[data-testid="stChatInput"] textarea {background:#1f2740!important;color:#ffffff!important;caret-color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;font-size:16px!important;line-height:1.35!important;padding-top:12px!important;padding-bottom:12px!important;}
@@ -580,13 +580,13 @@ div[data-testid="stChatInput"] [data-baseweb="textarea"] {background:#1f2740!imp
 div[data-testid="stChatInput"] [data-baseweb="textarea"] > div {background:transparent!important;display:flex!important;align-items:center!important;}
 div[data-testid="stChatInput"] button {background:#2f3a5f!important;color:#ffffff!important;border-radius:14px!important;}
 div[data-testid="stChatInput"] button svg {fill:#ffffff!important;}
-.miya-chat-wrap{padding-top:0px;margin-top:0px;padding-bottom:65px;}
-.miya-row{display:flex; margin:0 0 12px 0; width:100%;}
+.miya-chat-wrap{padding-top:0;margin-top:-10px;padding-bottom:62px;}
+.miya-row{display:flex; margin:0 0 10px 0; width:100%;}
 .miya-row:first-child{margin-top:0 !important;}
 .miya-row.assistant{justify-content:flex-start;}
 .miya-row.user{justify-content:flex-end;}
 .miya-msgbox{max-width:82%;}
-.miya-label{font-size:12px; color:#6d7383; font-weight:700; margin-bottom:6px;}
+.miya-label{font-size:12px; color:#6d7383; font-weight:700; margin-bottom:4px;}
 .miya-row.user .miya-label{text-align:right;}
 .miya-bubble{padding:10px 13px; border-radius:16px; line-height:1.55; font-size:14.5px; word-break:keep-all; box-shadow:none; white-space:pre-wrap;}
 .miya-row.assistant .miya-bubble{background:var(--miya-bot-bg); color:#ffffff; border-top-left-radius:8px;}
@@ -603,7 +603,7 @@ div[data-testid="stChatInput"] button svg {fill:#ffffff!important;}
 
 st.markdown(
     """
-    <div style="text-align:center; margin:0 0 8px 0;">
+    <div style="text-align:center; margin:0 0 6px 0;">
       <div style="font-size:31px; font-weight:800; line-height:1.1; letter-spacing:-0.02em; color:#303443;">
         미샵 쇼핑친구 <span style="color:#0f6a63;">미야언니</span>
       </div>
@@ -617,7 +617,7 @@ st.markdown(
 
 st.markdown(
     """
-    <div style="margin-top:0px; margin-bottom:2px;">
+    <div style="margin-top:0; margin-bottom:0;">
       <div style="font-size:13px; font-weight:700; line-height:1.2; color:#303443; margin-bottom:4px;">
         사이즈 입력<span style="font-size:11px; font-weight:500; color:#7a7f8c;">(더 구체적인 상담 가능)</span>
       </div>
