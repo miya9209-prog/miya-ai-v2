@@ -837,57 +837,129 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
     finally:
         st.session_state.is_processing = False
 
-# =========================
-# 화면 렌더링
-# =========================
+# query params
+qp = st.query_params
+current_url = clean_text(qp.get("url", "") or "")
+product_no_q = normalize_product_no(clean_text(qp.get("pn", "") or ""))
+product_name_q = clean_text(qp.get("pname", "") or "")
+product_no = product_no_q or extract_product_no_from_url(current_url)
+
+context_key = f"{current_url}|{product_no}|{product_name_q}"
+if context_key != st.session_state.last_context_key:
+    st.session_state.last_context_key = context_key
+    st.session_state.messages = []
+    st.session_state.last_user_hash = ""
+    st.session_state.last_answer = ""
+    st.session_state.last_recommendations = []
+    st.session_state.reco_seen_names = []
+    st.session_state.reco_seen_names = []
+
+product_context = fetch_product_context(current_url, product_name_q, product_no) if current_url else {
+    "product_no": product_no,
+    "product_name": "지금 보시는 상품",
+    "category": "기타",
+    "summary": "",
+    "material": "",
+    "fit": "",
+    "size_tip": "",
+    "raw_excerpt": "",
+    "colors": [],
+}
+db_product = get_db_product(product_no)
+if db_product and clean_text(db_product.get("product_name", "")):
+    product_context["product_name"] = clean_text(db_product.get("product_name", ""))
+
+# ---------- UI ----------
 st.markdown("""
 <style>
-.block-container{padding-top:0.7rem;padding-bottom:0.4rem;max-width:760px;}
-div[data-testid="stChatInput"] {position: fixed; bottom: 20px; left: calc(50% - 310px); width: 620px; background: white; z-index:999;}
-@media (max-width:900px){
-  div[data-testid="stChatInput"] {left: 1rem; right: 1rem; width: auto;}
-}
+header[data-testid="stHeader"] {display:none;}
+div[data-testid="stToolbar"] {display:none;}
+#MainMenu {visibility:hidden;}
+footer {visibility:hidden;}
+.block-container{max-width:760px;padding-top:0.22rem !important;padding-bottom:11.0rem !important;}
+:root{--miya-accent:#0f6a63;--miya-title:#303443;--miya-sub:#5f6471;--miya-muted:#8f94a3;--miya-divider:#ccccd2;--miya-bot-bg:#071b4e;--miya-user-bg:#dff0ec;--miya-user-text:#1f3b36;--miya-page-bg:#f6f7fb;}
+html, body, [data-testid="stAppViewContainer"], [data-testid="stMainBlockContainer"] {color: var(--miya-title);background: var(--miya-page-bg) !important;}
+[data-testid="stAppViewContainer"] > .main {background: var(--miya-page-bg) !important;}
+.block-container{background: var(--miya-page-bg) !important;}
+div[data-testid="stTextInput"] label,div[data-testid="stSelectbox"] label{color:var(--miya-title)!important;font-weight:700!important;font-size:11.5px!important;}
+div[data-testid="stTextInput"] input,div[data-baseweb="select"] > div{border-radius:12px!important;}
+hr{margin-top:4px!important;margin-bottom:4px!important;border-color:var(--miya-divider)!important;}
+div[data-testid="stChatInput"]{position:fixed!important;left:50%!important;transform:translateX(-50%)!important;bottom:68px!important;width:min(720px, calc(100% - 24px))!important;z-index:9999!important;background:transparent!important;}
+div[data-testid="stChatInput"] > div{background:transparent!important;border-radius:0!important;padding:0!important;box-shadow:none!important;border:none!important;}
+div[data-testid="stChatInput"] textarea {background:#1f2740!important;color:#ffffff!important;caret-color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;font-size:16px!important;line-height:1.35!important;padding-top:12px!important;padding-bottom:12px!important;}
+div[data-testid="stChatInput"] textarea::placeholder {color:#cfd6e6!important;opacity:1!important;-webkit-text-fill-color:#cfd6e6!important;}
+div[data-testid="stChatInput"] [data-baseweb="textarea"] {background:#1f2740!important;border-radius:999px!important;border:1px solid rgba(255,255,255,0.08)!important;min-height:52px!important;padding:0 10px!important;display:flex!important;align-items:center!important;}
+div[data-testid="stChatInput"] [data-baseweb="textarea"] > div {background:transparent!important;display:flex!important;align-items:center!important;}
+div[data-testid="stChatInput"] button {background:#2f3a5f!important;color:#ffffff!important;border-radius:14px!important;}
+div[data-testid="stChatInput"] button svg {fill:#ffffff!important;}
+@media (max-width: 768px){.block-container{max-width:100%;padding-top:0.14rem!important;padding-bottom:11.6rem!important;}div[data-testid="stHorizontalBlock"]{gap:6px!important;}div[data-testid="stHorizontalBlock"] > div{flex:1 1 0!important;min-width:0!important;}div[data-testid="stChatInput"]{bottom:64px!important;width:calc(100% - 16px)!important;}}
 </style>
 """, unsafe_allow_html=True)
 
-qp = st.query_params
-current_url = clean_text(qp.get("url", "")) if hasattr(qp, "get") else ""
-passed_pname = clean_text(qp.get("pname", "")) if hasattr(qp, "get") else ""
-passed_pn = normalize_product_no(clean_text(qp.get("pn", ""))) if hasattr(qp, "get") else ""
-product_context = fetch_product_context(current_url, passed_pname, passed_pn)
-db_product = get_db_product(product_context.get("product_no", ""))
+st.markdown(
+    """
+    <div style="text-align:center; margin:0 0 16px 0;">
+      <div style="font-size:31px; font-weight:800; line-height:1.1; letter-spacing:-0.02em; color:#303443;">
+        미샵 쇼핑친구 <span style="color:#0f6a63;">미야언니</span>
+      </div>
+      <div style="margin-top:6px; font-size:13.5px; line-height:1.35; color:#5f6471;">
+        24시간 쇼핑 결정에 도움드리는 스마트한 쇼핑친구
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
-ctx_key = json.dumps({"url": current_url, "pn": product_context.get("product_no", ""), "name": product_context.get("product_name", "")}, ensure_ascii=False)
-if st.session_state.last_context_key != ctx_key:
-    st.session_state.last_context_key = ctx_key
-    st.session_state.messages = []
-    st.session_state.last_recommendations = []
-    st.session_state.reco_cursor = 0
-    st.session_state.reco_seen_names = []
+st.markdown(
+    """
+    <div style="margin-top:2px; margin-bottom:4px;">
+      <div style="font-size:13px; font-weight:700; line-height:1.2; color:#303443; margin-bottom:4px;">
+        사이즈 입력<span style="font-size:11px; font-weight:500; color:#7a7f8c;">(더 구체적인 상담 가능)</span>
+      </div>
+      <div style="padding:6px 8px 0 8px; border:1px solid rgba(0,0,0,.04); border-radius:14px; background:transparent;">
+    """,
+    unsafe_allow_html=True,
+)
 
-col1, col2 = st.columns(2)
-with col1:
-    st.text_input("키", key="body_height")
-with col2:
-    st.text_input("체중", key="body_weight")
-col3, col4 = st.columns(2)
-with col3:
-    st.selectbox("상의", options=list(SIZE_ORDER.keys()), index=list(SIZE_ORDER.keys()).index(st.session_state.body_top) if st.session_state.body_top in SIZE_ORDER else 6, key="body_top")
-with col4:
-    st.selectbox("하의", options=list(SIZE_ORDER.keys()), index=list(SIZE_ORDER.keys()).index(st.session_state.body_bottom) if st.session_state.body_bottom in SIZE_ORDER else 6, key="body_bottom")
+row1 = st.columns(2, gap="small")
+with row1[0]:
+    st.session_state.body_height = st.text_input("키", value=st.session_state.body_height, placeholder="cm", key="body_height_input")
+with row1[1]:
+    st.session_state.body_weight = st.text_input("체중", value=st.session_state.body_weight, placeholder="kg", key="body_weight_input")
 
-st.caption(f"현재 입력 정보: 키: {clean_text(st.session_state.body_height)}cm, 체중: {clean_text(st.session_state.body_weight)}kg, 상의: {clean_text(st.session_state.body_top)}, 하의: {clean_text(st.session_state.body_bottom)}")
-st.divider()
+size_options = ["", "44", "55", "55반", "66", "66반", "77", "77반", "88"]
+row2 = st.columns(2, gap="small")
+with row2[0]:
+    current_top = st.session_state.body_top if st.session_state.body_top in size_options else ""
+    st.session_state.body_top = st.selectbox("상의", options=size_options, index=size_options.index(current_top), key="body_top_input")
+with row2[1]:
+    current_bottom = st.session_state.body_bottom if st.session_state.body_bottom in size_options else ""
+    st.session_state.body_bottom = st.selectbox("하의", options=size_options, index=size_options.index(current_bottom), key="body_bottom_input")
+
+st.markdown("</div></div>", unsafe_allow_html=True)
+
+body_summary = build_body_context_text(build_body_context())
+if any(build_body_context().values()):
+    st.markdown(f'<div style="margin-top:2px; margin-bottom:2px; font-size:10.8px; color:#7a7f8c;">현재 입력 정보: {html.escape(body_summary)}</div>', unsafe_allow_html=True)
 
 if not st.session_state.messages:
-    if current_url and product_context.get("product_name"):
-        welcome = f"안녕하세요? 옷 같이 봐드리는 미야언니예요 :) 지금 보시는 상품 기준으로 제가 같이 봐드릴게요. 사이즈, 코디, 배송, 교환 중 뭐부터 이야기해볼까요?"
+    current_url_lower = (current_url or "").lower()
+    is_detail_page = ("/product/detail" in current_url_lower) or ("product_no=" in current_url_lower) or bool(product_no)
+    if is_detail_page:
+        welcome = (
+            "안녕하세요? 옷 같이 봐드리는 미야언니예요 :)\n"
+            "'지금 보시는 상품' 기준으로 제가 같이 봐드릴게요.\n"
+            "사이즈, 코디, 배송, 교환 중 뭐부터 이야기해볼까요?"
+        )
     else:
-        welcome = ("안녕하세요? 옷 같이 봐드리는 미야언니예요 :)\n"
-                   "지금은 일반 상담 모드예요.\n"
-                   "상품 상세페이지에서 채팅창을 열면 그 상품 기준으로 더 정확하게 상담해드릴 수 있어요 :)\n"
-                   "이 창을 닫고 해당 상품 상세페이지에서 채팅창을 다시 클릭해주세요^^")
+        welcome = (
+            "안녕하세요? 옷 같이 봐드리는 미야언니예요 :)\n"
+            "지금은 일반 상담 모드예요.\n"
+            "상품 상세페이지에서 채팅창을 열면 그 상품 기준으로 더 정확하게 상담해드릴 수 있어요 :)"
+        )
     st.session_state.messages.append({"role": "assistant", "content": welcome})
+
+st.divider()
 
 for msg in st.session_state.messages:
     safe_text = html.escape(msg["content"]).replace("\n", "<br>")
@@ -896,7 +968,7 @@ for msg in st.session_state.messages:
             '<div style="display:flex; justify-content:flex-end; width:100%; margin:2px 0 4px 0;">'
             '<div style="max-width:92%;">'
             '<div style="display:block; font-size:12px; font-weight:700; line-height:1.15; color:#0f6a63; text-align:right; margin:0 6px 1px 0;">고객님</div>'
-            f'<div style="padding:10px 14px 10px 10px; border-radius:18px; border-bottom-right-radius:6px; font-size:15px; line-height:1.5; white-space:pre-wrap; word-break:keep-all; background:#dff0ec; color:#1f3b36; border:1px solid rgba(15,106,99,0.14);">{safe_text}</div>'
+            f'<div style="padding:10px 14px 10px 10px; border-radius:18px; border-bottom-right-radius:6px; font-size:15px; line-height:1.5; white-space:pre-wrap; word-break:keep-all; background:#dff0ec; color:#1f3b36; border:1px solid rgba(15,106,99,.14);">{safe_text}</div>'
             '</div></div>',
             unsafe_allow_html=True,
         )
@@ -910,11 +982,7 @@ for msg in st.session_state.messages:
             unsafe_allow_html=True,
         )
 
-st.write("")
-st.write("")
-st.write("")
-
-user_input = st.chat_input("메시지를 입력하세요.")
+user_input = st.chat_input("메시지를 입력하세요...")
 if user_input:
     process_user_message(user_input, product_context, db_product)
     st.rerun()
