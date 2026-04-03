@@ -1,900 +1,943 @@
-
-import os
+import base64
+import io
+import json
+import mimetypes
 import re
-import csv
-import html
 import time
-import datetime
-from typing import Optional, Dict, List, Tuple
-from urllib.parse import urlparse, parse_qs
+from typing import Any, Dict, List
 
-import requests
 import streamlit as st
-from bs4 import BeautifulSoup
+from docx import Document
+from docx.oxml.ns import qn
+from docx.shared import Pt
+from openai import OpenAI, RateLimitError
 
-st.set_page_config(page_title="미야언니", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="PAGE BUILDER", layout="wide")
 
-def ensure_state() -> None:
-    defaults = {
-        "messages": [],
-        "last_context_key": "",
-        "body_height": "",
-        "body_weight": "",
-        "body_top": "",
-        "body_bottom": "",
-        "last_answer": "",
-        "last_recommendations": [],
-        "reco_seen_names": [],
-        "last_reco_target": "",
-        "last_reco_type": "",
-        "last_selected_index": None,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+# -----------------------------
+# Session state
+# -----------------------------
+if "reset_nonce" not in st.session_state:
+    st.session_state.reset_nonce = 0
+if "naming_result" not in st.session_state:
+    st.session_state.naming_result = ""
+if "naming_input_value" not in st.session_state:
+    st.session_state.naming_input_value = ""
+if "generated_result" not in st.session_state:
+    st.session_state.generated_result = ""
+if "generated_docx" not in st.session_state:
+    st.session_state.generated_docx = b""
+if "generated_file_stem" not in st.session_state:
+    st.session_state.generated_file_stem = "page_builder"
 
-ensure_state()
-
-SIZE_ORDER = {"44": 1, "55": 2, "55반": 3, "66": 4, "66반": 5, "77": 6, "77반": 7, "88": 8, "99": 9}
-SIZE_LABELS = {v: k for k, v in SIZE_ORDER.items()}
-TOP_KEYWORDS = ["자켓", "재킷", "점퍼", "코트", "블라우스", "셔츠", "니트", "가디건", "맨투맨", "티셔츠", "후드", "조끼", "베스트"]
-BOTTOM_KEYWORDS = ["팬츠", "슬랙스", "바지", "데님", "청바지", "스커트", "치마", "레깅스"]
-ACCESSORY_WORDS = ["플랫", "슈즈", "슬링백", "샌들", "힐", "로퍼", "부츠", "백", "가방", "귀걸이", "목걸이", "벨트"]
-
-def clean_text(value) -> str:
-    if value is None:
-        return ""
-    text = str(value).replace("\xa0", " ")
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-def normalize_product_no(value) -> str:
-    text = clean_text(value)
-    return text[:-2] if text.endswith(".0") else text
-
-def size_rank(token: str) -> Optional[int]:
-    return SIZE_ORDER.get(clean_text(token))
-
-def rank_to_size(rank: Optional[int]) -> str:
-    return SIZE_LABELS.get(rank, "") if rank else ""
-
-def build_body_context() -> Dict[str, str]:
-    return {
-        "height_cm": clean_text(st.session_state.get("body_height", "")),
-        "weight_kg": clean_text(st.session_state.get("body_weight", "")),
-        "top_size": clean_text(st.session_state.get("body_top", "")),
-        "bottom_size": clean_text(st.session_state.get("body_bottom", "")),
-    }
-
-def body_summary_text() -> str:
-    vals = build_body_context()
-    if not any(vals.values()):
-        return "입력된 체형 정보 없음"
-    return (
-        f"키: {vals.get('height_cm') or '-'}cm, "
-        f"체중: {vals.get('weight_kg') or '-'}kg, "
-        f"상의: {vals.get('top_size') or '-'}, "
-        f"하의: {vals.get('bottom_size') or '-'}"
-    )
-
-def extract_product_no_from_url(url: str) -> str:
-    if not url:
-        return ""
-    try:
-        parsed = urlparse(url)
-        qs = parse_qs(parsed.query)
-        return normalize_product_no(qs.get("product_no", [""])[0] or qs.get("pn", [""])[0])
-    except Exception:
-        return ""
-
-def sanitize_product_name(name: str) -> str:
-    text = clean_text(name)
-    bad = [
-        "LOGIN", "JOIN", "MY PAGE", "MYPAGE", "CART", "ABOUT", "SHOP", "COMMUNITY",
-        "TIME SALE", "KRW", "미샵", "MISHARP", "{#item", "{#html", "기본 정보", "상품명"
-    ]
-    for piece in bad:
-        text = text.replace(piece, " ")
-    text = re.sub(r"\[[^\]]*\]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip(" -|/>")
-    return text
-
-def detect_category_from_name(name: str, raw_text: str = "") -> str:
-    corpus = f"{clean_text(name)} {clean_text(raw_text)}"
-    if "니트티" in corpus or "니트 티" in corpus:
-        return "니트티"
-    if "블라우스" in corpus:
-        return "블라우스"
-    if "셔츠" in corpus:
-        return "셔츠"
-    if "맨투맨" in corpus:
-        return "맨투맨"
-    if "티셔츠" in corpus:
-        return "티셔츠"
-    if "니트" in corpus or "가디건" in corpus:
-        return "니트"
-    if any(k in corpus for k in ["자켓", "재킷", "점퍼", "코트", "베스트", "조끼"]):
-        return "자켓"
-    if any(k in corpus for k in ["팬츠", "슬랙스", "바지", "데님", "청바지"]):
-        return "팬츠"
-    if "스커트" in corpus or "치마" in corpus:
-        return "스커트"
-    return "기타"
-
-def context_uses_top_size(product_context: Dict, db_product: Optional[Dict]) -> bool:
-    corpus = " ".join([
-        clean_text((db_product or {}).get("category", "")),
-        clean_text((db_product or {}).get("sub_category", "")),
-        clean_text((db_product or {}).get("product_name", "")),
-        clean_text((product_context or {}).get("category", "")),
-        clean_text((product_context or {}).get("product_name", "")),
-    ])
-    if any(k in corpus for k in TOP_KEYWORDS):
-        return True
-    if any(k in corpus for k in BOTTOM_KEYWORDS):
-        return False
-    return True
-
-def get_active_user_size(product_context: Dict, db_product: Optional[Dict]) -> Tuple[str, str]:
-    body = build_body_context()
-    if context_uses_top_size(product_context, db_product):
-        return clean_text(body.get("top_size", "")), "상의"
-    return clean_text(body.get("bottom_size", "")), "하의"
-
-def ensure_logs_dir() -> str:
-    path = "logs"
-    os.makedirs(path, exist_ok=True)
-    return path
-
-def write_chat_log(
-    event_type: str,
-    user_text: str = "",
-    answer: str = "",
-    response_mode: str = "",
-    fallback_reason: str = "",
-    error_text: str = "",
-    latency_ms: int = 0,
-    product_context: Optional[Dict] = None,
-) -> None:
-    try:
-        log_dir = ensure_logs_dir()
-        log_path = os.path.join(log_dir, f"chat_log_{datetime.datetime.now().strftime('%Y%m%d')}.csv")
-        row = {
-            "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
-            "event_type": event_type,
-            "session_id": st.session_state.get("last_context_key", ""),
-            "product_no": clean_text((product_context or {}).get("product_no", "")),
-            "product_name": clean_text((product_context or {}).get("product_name", "")),
-            "user_text": clean_text(user_text),
-            "response_mode": response_mode,
-            "fallback_reason": fallback_reason,
-            "is_fallback": "1" if response_mode in {"fallback", "rule_fallback"} else "0",
-            "error_text": clean_text(error_text),
-            "latency_ms": str(latency_ms),
-            "answer": clean_text(answer),
-        }
-        exists = os.path.exists(log_path)
-        with open(log_path, "a", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
-            if not exists:
-                writer.writeheader()
-            writer.writerow(row)
-    except Exception:
-        pass
-
-@st.cache_data(ttl=600, show_spinner=False)
-def load_product_db():
-    path = "misharp_miya_db.csv"
-    if not os.path.exists(path):
-        return []
-    try:
-        import pandas as pd
-        df = pd.read_csv(path)
-        df.columns = [clean_text(c) for c in df.columns]
-        for c in df.columns:
-            df[c] = df[c].fillna("").astype(str).map(clean_text)
-        if "product_no" in df.columns:
-            df["product_no"] = df["product_no"].map(normalize_product_no)
-        return df.to_dict(orient="records")
-    except Exception:
-        return []
-
-DB_ROWS = load_product_db()
-
-def get_db_product(product_no_value: str) -> Optional[Dict]:
-    if not product_no_value:
-        return None
-    target = normalize_product_no(product_no_value)
-    for row in DB_ROWS:
-        if normalize_product_no(row.get("product_no", "")) == target:
-            return row
-    return None
-
-def extract_meta_name(soup: BeautifulSoup) -> str:
-    candidates = []
-    for selector in ['meta[property="og:title"]','meta[name="og:title"]','meta[property="twitter:title"]','meta[name="title"]']:
-        tag = soup.select_one(selector)
-        if tag and tag.get("content"):
-            candidates.append(tag.get("content"))
-    if soup.title and soup.title.text:
-        candidates.append(soup.title.text)
-    for c in candidates:
-        s = sanitize_product_name(c)
-        if s:
-            return s
-    return ""
-
-def split_detail_sections(text: str) -> Dict[str, str]:
-    t = clean_text(text)
-    if not t:
-        return {"summary": "", "material": "", "fit": "", "size_tip": ""}
-    material, fit, size_tip = [], [], []
-    for sentence in re.split(r"(?<=[.!?])\s+|\s*/\s*", t):
-        s = clean_text(sentence)
-        if not s:
-            continue
-        if any(k in s for k in ["면", "코튼", "폴리", "레이온", "울", "아크릴", "스판", "나일론", "혼용", "%", "소재", "원단"]):
-            material.append(s)
-        if any(k in s for k in ["핏", "루즈", "정핏", "와이드", "커버", "복부", "허벅지", "힙", "라인", "여유", "벌룬", "루즈핏", "슬림"]):
-            fit.append(s)
-        if any(k in s for k in ["사이즈", "추천", "44", "55", "66", "77", "88", "FREE", "free"]):
-            size_tip.append(s)
-    return {"summary": t[:1400], "material": " / ".join(material)[:350], "fit": " / ".join(fit)[:350], "size_tip": " / ".join(size_tip)[:350]}
-
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_product_context(url: str, passed_name: str = "", passed_product_no: str = "") -> Dict:
-    safe_name = sanitize_product_name(passed_name)
-    safe_no = normalize_product_no(passed_product_no) or extract_product_no_from_url(url)
-    fallback_ctx = {"product_no": safe_no, "product_name": safe_name or "지금 보시는 상품", "category": "기타", "summary": "", "material": "", "fit": "", "size_tip": "", "raw_excerpt": ""}
-    if not url:
-        return fallback_ctx
-    try:
-        r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-        r.raise_for_status()
-    except Exception:
-        return fallback_ctx
-    soup = BeautifulSoup(r.text, "html.parser")
-    product_name = safe_name or extract_meta_name(soup)
-    for t in soup(["script", "style", "noscript", "header", "footer"]):
-        t.decompose()
-    raw_text = clean_text(re.sub(r"\n{2,}", "\n", soup.get_text("\n").replace("\r", "\n")))
-    sections = split_detail_sections(raw_text)
-    db_row = get_db_product(safe_no)
-    if db_row and clean_text(db_row.get("product_name")):
-        product_name = clean_text(db_row.get("product_name"))
-    if not product_name:
-        product_name = "지금 보시는 상품"
-    category = detect_category_from_name(product_name, raw_text)
-    return {"product_no": safe_no, "product_name": product_name, "category": category, "summary": sections["summary"], "material": sections["material"], "fit": sections["fit"], "size_tip": sections["size_tip"], "raw_excerpt": raw_text[:3000]}
-
-def is_pure_greeting(user_text: str) -> bool:
-    q = clean_text(user_text).replace(" ", "")
-    return q in {"안녕", "안녕하세요", "하이", "반가워", "헬로"}
-
-def is_size_question(user_text: str) -> bool:
-    q = clean_text(user_text)
-    return any(k in q for k in ["사이즈", "맞을까", "맞을까요", "맞겠나", "맞나", "맞아", "핏", "작을까", "클까", "여유", "타이트"])
-
-def is_recommendation_question(user_text: str) -> bool:
-    q = clean_text(user_text)
-    return any(k in q for k in ["추천", "어울리는", "같이 입", "코디", "매치", "무슨 바지", "어떤 바지", "무슨 치마", "잘 어울리는", "다른", "비슷한", "학교", "행사", "방문"])
-
-def is_name_question(user_text: str) -> bool:
-    q = clean_text(user_text).replace(" ", "")
-    return any(k in q for k in ["이옷이름", "상품명", "상품이름", "이름뭐", "이옷이뭐야", "품명"])
-
-def is_coordi_request(user_text: str) -> bool:
-    q = clean_text(user_text)
-    return any(k in q for k in ["코디", "학교방문", "학교 방문", "행사룩", "모임룩", "학부모", "뭐 입"])
-
-def is_detail_request(user_text: str) -> bool:
-    q = clean_text(user_text)
-    return any(k in q for k in ["전체적으로", "자세히", "설명", "얘기해줘", "좀 더", "어때", "괜찮아", "어울려", "핏", "코디", "사이즈", "다 같이 봐줘", "다같이 봐줘"])
-
-def parse_range_from_text(text: str) -> Tuple[Optional[int], Optional[int]]:
-    text = clean_text(text).replace("~", "-")
-    tokens = []
-    ordered = ["44", "55반", "55", "66반", "66", "77반", "77", "88", "99"]
-    for token in ordered:
-        if token in text:
-            r = size_rank(token)
-            if r:
-                tokens.append(r)
-    if not tokens:
-        if "FREE" in text.upper():
-            return size_rank("55"), size_rank("77")
-        return None, None
-    return min(tokens), max(tokens)
-
-def evaluate_size_support(user_size: str, body_label: str, product_context: Dict, db_product: Optional[Dict]) -> Dict:
-    rank = size_rank(user_size)
-    if not rank:
-        return {"supported": None, "reason": "", "confidence": "unknown"}
-    text_sources = [
-        clean_text((db_product or {}).get("size_range", "")),
-        clean_text((product_context or {}).get("size_tip", "")),
-        clean_text((product_context or {}).get("summary", "")),
-        clean_text((product_context or {}).get("fit", "")),
-        clean_text((db_product or {}).get("fit_type", "")),
-    ]
-    max_rank = None
-    for src in text_sources:
-        _, hi = parse_range_from_text(src)
-        if hi:
-            max_rank = hi if max_rank is None else max(max_rank, hi)
-    fit_corpus = " ".join(text_sources)
-    has_loose = any(k in fit_corpus for k in ["루즈", "여유", "오버", "벌룬"])
-    has_regular = any(k in fit_corpus for k in ["정핏", "기본", "슬림"])
-    if max_rank:
-        if rank > max_rank:
-            return {"supported": False, "reason": f"최대 {rank_to_size(max_rank)} 정도까지로 보여서 고객님 {body_label} {user_size} 기준으로는 살짝 타이트하게 느껴질 수 있어요.", "confidence": "range"}
-        if rank == max_rank:
-            return {"supported": "edge", "reason": f"고객님 {body_label} {user_size} 기준이면 경계선에 가까운 쪽이에요.", "confidence": "range"}
-        return {"supported": True, "reason": f"고객님 {body_label} {user_size} 기준으로는 기본 가능권 안쪽으로 보여요.", "confidence": "range"}
-    if has_regular:
-        return {"supported": "edge", "reason": f"지금 보이는 정보로는 슬림하거나 정핏에 가까워서 고객님 {body_label} {user_size} 기준으로는 또렷하게 느껴질 수 있어요.", "confidence": "fit"}
-    if has_loose:
-        return {"supported": True, "reason": "지금 보이는 정보로는 루즈한 쪽이라 답답하게 붙는 타입은 아닐 것 같아요.", "confidence": "fit"}
-    return {"supported": None, "reason": "지금 정보만으로는 딱 잘라 말씀드리기보다는 실측까지 같이 보는 쪽이 더 정확해요.", "confidence": "unknown"}
-
-def build_size_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
-    user_size, body_label = get_active_user_size(product_context, db_product)
-    product_name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품")
-    if not user_size:
-        return "사이즈 같이 봐드릴게요 :) 상의랑 하의 사이즈 먼저 알려주시면 더 정확하게 말씀드릴 수 있어요."
-    result = evaluate_size_support(user_size, body_label, product_context, db_product)
-    q = clean_text(user_text)
-    fit_corpus = " ".join([
-        clean_text((db_product or {}).get("fit_type", "")),
-        clean_text(product_context.get("fit", "")),
-        clean_text(product_context.get("summary", "")),
-    ])
-    is_loose = any(k in fit_corpus for k in ["루즈", "여유", "오버", "벌룬"])
-    looks_short = "키가 작" in q or "키가 작은" in q
-    upper_heavy = "상체" in q and any(k in q for k in ["큰", "크고", "있는"])
-    if context_uses_top_size(product_context, db_product) and is_loose and (upper_heavy or user_size in ["77", "77반", "88"]):
-        parts = [f"고객님 {body_label} {user_size} 기준으로 보면 {product_name}은 입는 것 자체는 가능해도, 핏이 예쁘게 떨어지는 쪽은 아닐 수 있어요."]
-        if upper_heavy:
-            parts.append("루즈핏이라 상체가 있는 편이면 오히려 더 부해 보일 수 있고요.")
-        if looks_short:
-            parts.append("키가 작은 편이면 기장도 조금 더 크게 느껴질 수 있어요.")
-        parts.append("편하게 툭 입는 느낌은 가능하지만, 깔끔하게 정리돼 보이는 쪽을 찾으시면 조금 더 짧거나 정돈된 핏이 더 나아요.")
-        return " ".join(parts)
-    parts = [f"고객님 {body_label} {user_size} 기준으로 보면 {product_name}은 {result.get('reason','무리 없는 쪽으로 보여요.')}"]
-    if upper_heavy and context_uses_top_size(product_context, db_product):
-        parts.append("상체가 있는 편이라고 하셔서 어깨나 가슴 쪽은 조금 더 또렷하게 느껴지실 수 있어요.")
-    if looks_short and is_loose:
-        parts.append("키가 작은 편이면 기장이 살짝 크게 느껴질 수도 있어요.")
-    if result.get("supported") is False:
-        parts.append("편하게 입으시는 기준이면 한 단계 더 여유 있는 쪽이나, 핏이 정돈된 다른 타입 같이 보시는 게 더 좋아요.")
-    elif result.get("supported") == "edge":
-        parts.append("입으실 수는 있는데, 여유 있게 입는 기준이면 조금 더 편한 쪽이 더 안정적이에요.")
-    else:
-        parts.append("전체적으로는 가능권 안쪽으로 볼 수 있어요.")
-    return " ".join(parts)
-
-def infer_target_category_from_query(user_text: str, current_product: Dict) -> str:
-    q = clean_text(user_text)
-
-    # 직전 선택 상품을 기준으로 한 후속 코디 질문 우선 처리
-    if st.session_state.get("last_selected_index") is not None:
-        if any(k in q for k in ["바지", "슬랙스", "팬츠", "데님", "청바지"]):
-            return "팬츠"
-        if any(k in q for k in ["스커트", "치마"]):
-            return "스커트"
-
-    if "니트티" in q or "니트 티" in q:
-        return "니트티"
-    if "맨투맨" in q:
-        return "맨투맨"
-    if "블라우스" in q:
-        return "블라우스"
-    if "셔츠" in q:
-        return "셔츠"
-    if "니트" in q or "가디건" in q:
-        return "니트"
-    if "자켓" in q or "재킷" in q or "아우터" in q:
-        return "자켓"
-    if any(k in q for k in ["바지", "슬랙스", "팬츠", "데님", "청바지"]):
-        return "팬츠"
-    if any(k in q for k in ["스커트", "치마"]):
-        return "스커트"
-    if "어울리는 바지" in q:
-        return "팬츠"
-    return ""
-
-def row_blob(rowd: Dict) -> str:
-    cols = ["product_name", "category", "sub_category", "style_tags", "coordination_items", "body_cover_features", "recommended_body_type", "product_summary", "fabric", "fit_type"]
-    return " ".join(clean_text(rowd.get(c, "")) for c in cols)
-
-def normalized_row_category(rowd: Dict) -> str:
-    combined = " ".join([
-        clean_text(rowd.get("product_name", "")),
-        clean_text(rowd.get("category", "")),
-        clean_text(rowd.get("sub_category", "")),
-    ])
-    return detect_category_from_name(combined, combined)
-
-def row_matches_target(rowd: Dict, target_cat: str) -> bool:
-    row_cat = normalized_row_category(rowd)
-    if target_cat == "니트":
-        return row_cat in {"니트", "니트티"}
-    if target_cat == "니트티":
-        return row_cat == "니트티"
-    return row_cat == target_cat
-
-def row_is_accessory(rowd: Dict) -> bool:
-    blob = row_blob(rowd)
-    return any(k in blob for k in ACCESSORY_WORDS)
-
-def get_base_selected_product() -> Optional[Dict]:
-    recos = st.session_state.get("last_recommendations", [])
-    idx = st.session_state.get("last_selected_index", None)
-    if idx is None or idx >= len(recos):
-        return None
-    row = recos[idx]
-    return {
-        "product_name": clean_text(row.get("product_name", "")),
-        "category": normalized_row_category(row),
-        "summary": clean_text(row.get("product_summary", "")),
-        "fit": clean_text(row.get("fit_type", "")),
-        "size_tip": clean_text(row.get("size_range", "")),
-        "product_no": clean_text(row.get("product_no", "")),
-    }
-
-def item_supports_user(rowd: Dict, target_cat: str) -> bool:
-    temp_ctx = {
-        "product_name": clean_text(rowd.get("product_name", "")),
-        "category": normalized_row_category(rowd),
-        "summary": clean_text(rowd.get("product_summary", "")),
-        "fit": clean_text(rowd.get("fit_type", "")),
-        "size_tip": clean_text(rowd.get("size_range", "")),
-    }
-    user_size, body_label = get_active_user_size(temp_ctx, rowd)
-    if not user_size:
-        return True
-    result = evaluate_size_support(user_size, body_label, temp_ctx, rowd)
-    return result.get("supported") in [True, "edge", None]
-
-def build_reason(rowd: Dict, user_text: str, target_cat: str) -> str:
-    corpus = row_blob(rowd)
-    reasons = []
-    selected_base = get_base_selected_product()
-    if target_cat in ["팬츠", "스커트"]:
-        if selected_base:
-            reasons.append(f"{selected_base.get('product_name','지금 고른 상의')}랑 붙였을 때 전체 라인이 깔끔하게 정리되는 쪽이에요")
-        else:
-            reasons.append("지금 보시는 상의랑 붙였을 때 전체 라인이 깔끔하게 정리되는 쪽이에요")
-    else:
-        if any(k in corpus for k in ["루즈", "여유", "오버"]):
-            reasons.append("상체가 있는 편이어도 답답한 느낌이 덜한 편이에요")
-        elif any(k in corpus for k in ["정핏", "기본", "슬림"]):
-            reasons.append("너무 부해 보이지 않고 깔끔하게 잡히는 쪽이에요")
-        else:
-            reasons.append("전체 핏이 과하게 크지 않아 정리돼 보이기 좋아요")
-    if any(k in clean_text(user_text) for k in ["학교", "행사", "학부모", "모임", "방문"]):
-        reasons.append("단정하게 보이기 좋아 학교 방문 코디에도 무리 없는 쪽이에요")
-    return " ".join(reasons[:2]).strip()
-
-def pick_recommendation_rows(target_cat: str, user_text: str, product_context: Dict, db_product: Optional[Dict], limit: int = 3) -> List[Dict]:
-    current_no = clean_text((db_product or {}).get("product_no", "") or product_context.get("product_no", ""))
-    seen_names = set(st.session_state.get("reco_seen_names", []))
-    q = clean_text(user_text)
-    candidates = []
-    for row in DB_ROWS:
-        name = clean_text(row.get("product_name", ""))
-        if not name:
-            continue
-        if row_is_accessory(row):
-            continue
-        if current_no and normalize_product_no(row.get("product_no", "")) == normalize_product_no(current_no):
-            continue
-        if not row_matches_target(row, target_cat):
-            continue
-        if name in seen_names:
-            continue
-        if any(k in q for k in ["학교", "행사", "학부모", "모임", "방문"]) and any(k in name for k in ["후드", "쭈리", "트레이닝"]):
-            continue
-        if not item_supports_user(row, target_cat):
-            continue
-        candidates.append(row)
-    if len(candidates) < limit:
-        for row in DB_ROWS:
-            name = clean_text(row.get("product_name", ""))
-            if not name:
-                continue
-            if row_is_accessory(row):
-                continue
-            if current_no and normalize_product_no(row.get("product_no", "")) == normalize_product_no(current_no):
-                continue
-            if not row_matches_target(row, target_cat):
-                continue
-            if row in candidates:
-                continue
-            if any(k in q for k in ["학교", "행사", "학부모", "모임", "방문"]) and any(k in name for k in ["후드", "쭈리", "트레이닝"]):
-                continue
-            candidates.append(row)
-            if len(candidates) >= limit:
-                break
-    return candidates[:limit]
-
-def recommend_products(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
-    current_product = {
-        "product_name": clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "")),
-        "category": clean_text((db_product or {}).get("category", "") or product_context.get("category", "")),
-    }
-    target_cat = infer_target_category_from_query(user_text, current_product)
-    if not target_cat:
-        target_cat = "팬츠"
-    picked = pick_recommendation_rows(target_cat, user_text, product_context, db_product, limit=3)
-    if not picked:
-        return f"지금 조건에 딱 맞는 {target_cat}가 바로 많이 잡히진 않아서요. 원하시면 조금 더 단정하게 볼지, 편하게 볼지 기준을 맞춰서 다시 골라드릴게요 :)"
-    st.session_state.last_recommendations = picked
-    st.session_state.reco_seen_names.extend([clean_text(x.get("product_name", "")) for x in picked])
-    st.session_state.last_reco_target = target_cat
-    st.session_state.last_selected_index = None
-    prefix = {
-        "니트티": "네, 고객님 쪽에 잘 맞을 만한 니트티로 먼저 골라드릴게요.",
-        "맨투맨": "네, 고객님 쪽에 잘 맞을 만한 맨투맨으로 먼저 골라드릴게요.",
-        "블라우스": "네, 고객님 쪽에 잘 맞을 만한 블라우스로 먼저 골라드릴게요.",
-        "셔츠": "네, 고객님 쪽에 잘 맞을 만한 셔츠로 먼저 골라드릴게요.",
-        "니트": "네, 고객님 쪽에 잘 맞을 만한 니트로 먼저 골라드릴게요.",
-        "자켓": "네, 고객님 쪽에 잘 맞을 만한 자켓으로 먼저 골라드릴게요.",
-        "팬츠": "네, 지금 옷이랑 잘 이어입기 좋은 바지로 먼저 골라드릴게요.",
-        "스커트": "네, 지금 옷이랑 잘 이어입기 좋은 스커트로 먼저 골라드릴게요.",
-    }.get(target_cat, "네, 같이 보기 좋은 상품으로 먼저 골라드릴게요.")
-    lines = [prefix]
-    for i, row in enumerate(picked, start=1):
-        lines.append(f"{i}. {clean_text(row.get('product_name',''))} — {build_reason(row, user_text, target_cat)}")
-    lines.append("마음 가는 번호 말씀해주시면 그 상품 기준으로 사이즈감까지 바로 이어서 봐드릴게요 :)")
-    return "\n".join(lines)
-
-def build_school_visit_item_line(row: Dict, user_text: str, target_cat: str) -> str:
-    temp_ctx = {
-        "product_name": clean_text(row.get("product_name", "")),
-        "category": normalized_row_category(row),
-        "summary": clean_text(row.get("product_summary", "")),
-        "fit": clean_text(row.get("fit_type", "")),
-        "size_tip": clean_text(row.get("size_range", "")),
-    }
-    user_size, body_label = get_active_user_size(temp_ctx, row)
-    result = evaluate_size_support(user_size, body_label, temp_ctx, row)
-    tail = "학교 방문처럼 단정하게 보여야 하는 자리에도 무리 없는 쪽이에요" if target_cat == "자켓" else "상의를 깔끔하게 받쳐줘서 상담 자리 코디에도 잘 어울리는 쪽이에요"
-    return f"{clean_text(row.get('product_name',''))} — {result.get('reason', '무리 없는 쪽이에요.')} {tail}"
-
-def build_school_visit_coordi_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
-    outer_candidates = pick_recommendation_rows("자켓", user_text, product_context, db_product, limit=2)
-    bottom_candidates = pick_recommendation_rows("팬츠", user_text, product_context, db_product, limit=2)
-    lines = ["네, 학교 방문이면 너무 캐주얼한 것보다는 단정하게 정리되는 쪽으로 같이 골라드릴게요."]
-    combined = []
-    for row in outer_candidates[:2]:
-        combined.append((row, "자켓"))
-    for row in bottom_candidates[:2]:
-        if len(combined) >= 3:
-            break
-        combined.append((row, "팬츠"))
-    if not combined:
-        return "학교 방문에 맞는 단정한 코디를 바로 많이 잡지는 못했어요. 자켓 쪽으로 볼지, 팬츠 쪽으로 볼지 먼저 정해서 같이 골라드릴게요 :)"
-    for i, (row, cat) in enumerate(combined, start=1):
-        lines.append(f"{i}. {build_school_visit_item_line(row, user_text, cat)}")
-    lines.append("마음 가는 번호 말씀해주시면 그 기준으로 더 자세히 봐드릴게요 :)")
-    st.session_state.last_recommendations = [row for row, _ in combined]
-    st.session_state.last_reco_target = "코디"
-    st.session_state.last_selected_index = None
-    return "\n".join(lines)
-
-def extract_selected_index(user_text: str) -> Optional[int]:
-    q = clean_text(user_text)
-    m = re.search(r"([123])번", q)
-    if m:
-        return int(m.group(1)) - 1
-    if "첫 번째" in q or "첫번째" in q:
-        return 0
-    if "두 번째" in q or "두번째" in q:
-        return 1
-    if "세 번째" in q or "세번째" in q:
-        return 2
-    return None
-
-def update_selected_index_from_message(user_text: str) -> None:
-    idx = extract_selected_index(user_text)
-    if idx is not None:
-        st.session_state.last_selected_index = idx
-
-def build_selected_item_detail_answer(user_text: str) -> str:
-    recos = st.session_state.get("last_recommendations", [])
-    idx = extract_selected_index(user_text)
-    if idx is None:
-        idx = st.session_state.get("last_selected_index", None)
-    if idx is None or idx >= len(recos):
-        return "지금 보고 있는 상품 번호를 한 번만 더 말씀해주시면 바로 이어서 자세히 봐드릴게요 :)"
-    st.session_state.last_selected_index = idx
-    row = recos[idx]
-    name = clean_text(row.get("product_name", ""))
-    target_cat = normalized_row_category(row)
-    temp_ctx = {
-        "product_name": name,
-        "category": target_cat,
-        "summary": clean_text(row.get("product_summary", "")),
-        "fit": clean_text(row.get("fit_type", "")),
-        "size_tip": clean_text(row.get("size_range", "")),
-    }
-    user_size, body_label = get_active_user_size(temp_ctx, row)
-    size_result = evaluate_size_support(user_size, body_label, temp_ctx, row)
-    q = clean_text(user_text)
-
-    want_size = "사이즈" in q
-    want_coordi = any(k in q for k in ["코디", "바지", "같이 입", "어울"])
-    want_all = any(k in q for k in ["전체적으로", "다 같이", "다같이", "설명", "얘기해줘", "어때"]) or (not want_size and not want_coordi)
-
-    size_sentence = f"고객님 {body_label} {user_size} 기준으로는 {size_result.get('reason', '무리 없는 쪽이에요.')}"
-    fit_text = clean_text(row.get("fit_type", ""))
-    fit_sentence = "전체적으로 과하게 크거나 작지 않은 무난한 핏이에요."
-    if any(k in fit_text for k in ["루즈", "여유", "오버"]):
-        fit_sentence = "루즈한 쪽이라 편하게 입기는 좋은데, 상체가 있는 편이면 조금 더 크게 느껴질 수 있어요."
-    elif any(k in fit_text for k in ["슬림", "정핏"]):
-        fit_sentence = "라인이 정리돼 보이는 대신 여유가 많은 타입은 아니에요."
-    coordi_sentence = "슬랙스나 일자 팬츠 쪽이랑 같이 입으시면 단정하게 정리돼 보여요."
-    if target_cat in ["팬츠", "스커트"]:
-        coordi_sentence = "상의는 너무 부한 것보다 깔끔한 셔츠나 니트 쪽이 더 잘 어울려요."
-
-    parts = [f"{idx+1}번 {name} 기준으로 보면,"]
-    if want_all or want_size:
-        parts.append(size_sentence)
-    if want_all:
-        parts.append(fit_sentence)
-    if want_all or want_coordi:
-        parts.append(coordi_sentence)
-    return " ".join(parts)
-
-def is_followup_size_on_recommendations(user_text: str) -> bool:
-    q = clean_text(user_text)
-    return bool(st.session_state.get("last_recommendations")) and (
-        ("추천해준" in q and any(k in q for k in ["사이즈", "맞아", "맞을까", "괜찮아"])) or
-        (any(k in q for k in ["그거", "그 상품", "1번", "2번", "3번", "첫 번째", "두 번째", "세 번째"]) and any(k in q for k in ["사이즈", "맞아", "맞을까", "괜찮아"]))
-    )
-
-def build_reco_followup_size_answer(user_text: str) -> str:
-    recos = st.session_state.get("last_recommendations", [])
-    if not recos:
-        return "지금 바로 이어서 볼 추천 상품이 없어서요 :) 먼저 보고 싶은 상품 하나 골라주시면 그 기준으로 바로 봐드릴게요."
-    idx = extract_selected_index(user_text)
-    if idx is not None and 0 <= idx < len(recos):
-        row = recos[idx]
-        st.session_state.last_selected_index = idx
-        temp_ctx = {
-            "product_name": clean_text(row.get("product_name", "")),
-            "category": normalized_row_category(row),
-            "summary": clean_text(row.get("product_summary", "")),
-            "fit": clean_text(row.get("fit_type", "")),
-            "size_tip": clean_text(row.get("size_range", "")),
-        }
-        user_size, body_label = get_active_user_size(temp_ctx, row)
-        result = evaluate_size_support(user_size, body_label, temp_ctx, row)
-        return f"{idx+1}번으로 추천드린 {clean_text(row.get('product_name',''))}은 고객님 {body_label} {user_size} 기준으로 보면 {result.get('reason','무리 없는 쪽으로 보여요.')} 지금 기준으로는 무리 없이 보셔도 되는 쪽이에요."
-    lines = []
-    for i, row in enumerate(recos[:3], start=1):
-        temp_ctx = {
-            "product_name": clean_text(row.get("product_name", "")),
-            "category": normalized_row_category(row),
-            "summary": clean_text(row.get("product_summary", "")),
-            "fit": clean_text(row.get("fit_type", "")),
-            "size_tip": clean_text(row.get("size_range", "")),
-        }
-        user_size, body_label = get_active_user_size(temp_ctx, row)
-        result = evaluate_size_support(user_size, body_label, temp_ctx, row)
-        lines.append(f"{i}번 {clean_text(row.get('product_name',''))}은 고객님 {body_label} {user_size} 기준으로 {result.get('reason','무리 없는 쪽으로 보여요.')}")
-    return "\n".join(lines)
-
-
-def is_selected_item_outfit_request(user_text: str) -> bool:
-    q = clean_text(user_text)
-    if st.session_state.get("last_selected_index") is None:
-        return False
-    return (
-        any(k in q for k in ["같이 입", "어울리는", "코디"]) and any(k in q for k in ["바지", "슬랙스", "팬츠", "치마", "스커트"])
-    ) or ("바지 추천" in q) or ("팬츠 추천" in q)
-def get_fast_policy_answer(user_text: str) -> Optional[str]:
-    q = clean_text(user_text).replace(" ", "")
-    if any(k in q for k in ["배송비", "무료배송"]):
-        return "배송비는 3,000원이고요 :) 7만원 이상이면 무료배송으로 보시면 돼요."
-    if any(k in q for k in ["출고", "당일출고", "언제와", "언제와요", "배송언제"]):
-        return "보통 결제 완료 후 2~4영업일 정도로 봐주시면 되고요 :) 오후 2시 이전 주문은 당일 출고 기준으로 안내드리고 있어요."
-    if "교환" in q:
-        return "교환은 가능해요 :) 상품 수령 후 7일 이내 접수해주시면 되고, 단순 변심 교환은 왕복 배송비 기준으로 안내드리고 있어요."
-    if any(k in q for k in ["반품", "환불"]):
-        return "반품도 가능해요 :) 상품 수령 후 7일 이내 접수해주시면 되고, 단순 변심 반품은 주문금액 기준에 따라 배송비가 달라질 수 있어요."
-    return None
-
-def process_user_message(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
-    started = time.time()
-    try:
-        q = clean_text(user_text)
-        if not q:
-            return ""
-        update_selected_index_from_message(q)
-        if is_pure_greeting(q):
-            return "안녕하세요 :) 지금 보시는 상품 같이 봐드릴게요. 사이즈가 궁금하신지, 코디가 궁금하신지 편하게 말씀 주세요."
-        if is_followup_size_on_recommendations(q):
-            answer = build_reco_followup_size_answer(q)
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_reco_followup", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
-        if is_name_question(q):
-            name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품")
-            answer = f"지금 보시는 상품은 {name}이에요 :)"
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_name", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
-        if is_selected_item_outfit_request(q):
-            answer = recommend_products(q, product_context, db_product)
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_selected_outfit", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
-        if is_coordi_request(q):
-            answer = build_school_visit_coordi_answer(q, product_context, db_product)
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_coordi", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
-        if is_recommendation_question(q):
-            answer = recommend_products(q, product_context, db_product)
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_recommendation", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
-        if is_detail_request(q) and st.session_state.get("last_recommendations"):
-            answer = build_selected_item_detail_answer(q)
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_selected_detail", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
-        policy = get_fast_policy_answer(q)
-        if policy:
-            write_chat_log("assistant_response", user_text=q, answer=policy, response_mode="rule_policy", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return policy
-        if is_size_question(q):
-            answer = build_size_answer(q, product_context, db_product)
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_size", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
-        answer = "같이 봐드릴게요 :) 사이즈부터 볼지, 코디부터 볼지 편하게 말씀 주세요."
-        write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="fallback", fallback_reason="generic", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-        return answer
-    except Exception as e:
-        answer = "앗, 제가 방금 말을 매끄럽게 못 이었어요. 한 번만 더 보내주시면 바로 이어서 봐드릴게요 :)"
-        write_chat_log("error", user_text=user_text, answer=answer, response_mode="error", error_text=str(e), latency_ms=int((time.time()-started)*1000), product_context=product_context)
-        return answer
-
-params = st.query_params
-current_url = clean_text(params.get("url", ""))
-passed_product_name = clean_text(params.get("pname", ""))
-passed_product_no = clean_text(params.get("pn", "")) or extract_product_no_from_url(current_url)
-product_context = fetch_product_context(current_url, passed_product_name, passed_product_no)
-db_product = get_db_product(product_context.get("product_no", ""))
-
-context_key = f"{product_context.get('product_no','')}|{product_context.get('product_name','')}"
-if context_key != st.session_state.get("last_context_key", ""):
-    st.session_state.last_context_key = context_key
-    st.session_state.messages = []
-    st.session_state.last_recommendations = []
-    st.session_state.reco_seen_names = []
-    st.session_state.last_reco_target = ""
-    st.session_state.last_selected_index = None
-
-st.markdown("""
+st.markdown(
+    """
 <style>
-header[data-testid="stHeader"] {display:none;}
-div[data-testid="stToolbar"] {display:none;}
-#MainMenu {visibility:hidden;}
-footer {visibility:hidden;}
-.block-container{max-width:760px;padding-top:0.02rem !important;padding-bottom:6.2rem !important;}
-:root{
-  --miya-accent:#0f6a63;--miya-title:#303443;--miya-sub:#5f6471;--miya-muted:#8f94a3;
-  --miya-divider:#ccccd2;--miya-bot-bg:#071b4e;--miya-user-bg:#dff0ec;--miya-user-text:#1f3b36;
-  --miya-page-bg:#f6f7fb;
-}
-html, body, [data-testid="stAppViewContainer"], [data-testid="stMainBlockContainer"] {color: var(--miya-title);background: var(--miya-page-bg) !important;}
-[data-testid="stAppViewContainer"] > .main {background: var(--miya-page-bg) !important;}
-.block-container{background: var(--miya-page-bg) !important;}
-div[data-testid="stTextInput"] label,div[data-testid="stSelectbox"] label{color:var(--miya-title)!important;font-weight:700!important;font-size:11.5px!important;}
-div[data-testid="stTextInput"] input,div[data-baseweb="select"] > div{border-radius:12px!important;}
-hr{margin-top:0 !important;margin-bottom:0 !important;border-color:var(--miya-divider)!important;}
-div[data-testid="stChatInput"]{position:fixed!important;left:50%!important;transform:translateX(-50%)!important;bottom:68px!important;width:min(720px, calc(100% - 24px))!important;z-index:9999!important;background:transparent!important;}
-div[data-testid="stChatInput"] > div{background:transparent!important;border-radius:0!important;padding:0!important;box-shadow:none!important;border:none!important;}
-div[data-testid="stChatInput"] textarea {background:#1f2740!important;color:#ffffff!important;caret-color:#ffffff!important;-webkit-text-fill-color:#ffffff!important;font-size:16px!important;line-height:1.35!important;padding-top:12px!important;padding-bottom:12px!important;}
-div[data-testid="stChatInput"] textarea::placeholder {color:#cfd6e6!important;opacity:1!important;-webkit-text-fill-color:#cfd6e6!important;}
-div[data-testid="stChatInput"] [data-baseweb="textarea"] {background:#1f2740!important;border-radius:999px!important;border:1px solid rgba(255,255,255,0.08)!important;min-height:52px!important;padding:0 10px!important;display:flex!important;align-items:center!important;}
-div[data-testid="stChatInput"] [data-baseweb="textarea"] > div {background:transparent!important;display:flex!important;align-items:center!important;}
-div[data-testid="stChatInput"] button {background:#2f3a5f!important;color:#ffffff!important;border-radius:14px!important;}
-div[data-testid="stChatInput"] button svg {fill:#ffffff!important;}
-.miya-chat-wrap{padding-top:0;margin-top:-10px;padding-bottom:62px;}
-.miya-row{display:flex; margin:0 0 10px 0; width:100%;}
-.miya-row.assistant{justify-content:flex-start;}
-.miya-row.user{justify-content:flex-end;}
-.miya-msgbox{max-width:82%;}
-.miya-label{font-size:12px; color:#6d7383; font-weight:700; margin-bottom:4px;}
-.miya-row.user .miya-label{text-align:right;}
-.miya-bubble{padding:10px 13px; border-radius:16px; line-height:1.55; font-size:14.5px; word-break:keep-all; box-shadow:none; white-space:pre-wrap;}
-.miya-row.assistant .miya-bubble{background:var(--miya-bot-bg); color:#ffffff; border-top-left-radius:8px;}
-.miya-row.user .miya-bubble{background:var(--miya-user-bg); color:var(--miya-user-text); border-top-right-radius:8px;}
-@media (max-width: 768px){
-  .block-container{max-width:100%;padding-top:0.02rem!important;padding-bottom:6.6rem!important;}
-  div[data-testid="stHorizontalBlock"]{gap:6px!important;}
-  div[data-testid="stHorizontalBlock"] > div{flex:1 1 0!important;min-width:0!important;}
-  div[data-testid="stChatInput"]{bottom:64px!important;width:calc(100% - 16px)!important;}
-  .miya-msgbox{max-width:88%;}
-}
+div[data-testid="stButton"] > button { min-height: 42px; }
 </style>
-""", unsafe_allow_html=True)
-
-st.markdown(
-    """
-    <div style="text-align:center; margin:0 0 6px 0;">
-      <div style="font-size:31px; font-weight:800; line-height:1.1; letter-spacing:-0.02em; color:#303443;">
-        미샵 쇼핑친구 <span style="color:#0f6a63;">미야언니</span>
-      </div>
-      <div style="margin-top:4px; font-size:13.5px; line-height:1.35; color:#5f6471;">
-        24시간 쇼핑 결정에 도움드리는 스마트한 쇼핑친구
-      </div>
-    </div>
-    """,
+""",
     unsafe_allow_html=True,
 )
 
-st.markdown(
-    """
-    <div style="margin-top:0; margin-bottom:0;">
-      <div style="font-size:13px; font-weight:700; line-height:1.2; color:#303443; margin-bottom:3px;">
-        사이즈 입력<span style="font-size:11px; font-weight:500; color:#7a7f8c;">(더 구체적인 상담 가능)</span>
-      </div>
-      <div style="padding:4px 8px 0 8px; border:1px solid rgba(0,0,0,0.04); border-radius:14px; background:transparent;">
-    """,
-    unsafe_allow_html=True,
-)
+st.title("MISHARP PAGE BUILDER")
+st.caption("구매전환율 상승을 위한 상세페이지 기획 + 상품 원고 생성기")
 
-row1 = st.columns(2, gap="small")
-with row1[0]:
-    st.session_state.body_height = st.text_input("키", value=st.session_state.body_height, placeholder="cm", key="body_height_input")
-with row1[1]:
-    st.session_state.body_weight = st.text_input("체중", value=st.session_state.body_weight, placeholder="kg", key="body_weight_input")
+api_key = st.secrets.get("OPENAI_API_KEY", "")
+if not api_key:
+    st.warning("OPENAI_API_KEY가 설정되지 않았습니다. Streamlit Cloud Secrets 또는 .streamlit/secrets.toml을 확인해 주세요.")
+    st.stop()
 
-size_options = ["", "44", "55", "55반", "66", "66반", "77", "77반", "88", "99"]
-row2 = st.columns(2, gap="small")
-with row2[0]:
-    current_top = st.session_state.body_top if st.session_state.body_top in size_options else ""
-    st.session_state.body_top = st.selectbox("상의", options=size_options, index=size_options.index(current_top), key="body_top_input")
-with row2[1]:
-    current_bottom = st.session_state.body_bottom if st.session_state.body_bottom in size_options else ""
-    st.session_state.body_bottom = st.selectbox("하의", options=size_options, index=size_options.index(current_bottom), key="body_bottom_input")
+client = OpenAI(api_key=api_key)
 
-st.markdown("</div></div>", unsafe_allow_html=True)
-st.markdown(f'<div style="margin-top:0; margin-bottom:0; font-size:10.8px; color:#7a7f8c;">현재 입력 정보: {html.escape(body_summary_text())}</div>', unsafe_allow_html=True)
-st.markdown("<hr>", unsafe_allow_html=True)
+FIXED_HTML_HEAD = """<meta http-equiv=\"X-UA-Compatible\" content=\"IE=edge,chrome=1\">
+<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
+<link href=\"http://fonts.googleapis.com/css?family=Roboto\" rel=\"stylesheet\" type=\"text/css\">
+<link href=\"http://netdna.bootstrapcdn.com/font-awesome/4.3.0/css/font-awesome.min.css\" rel=\"stylesheet\" type=\"text/css\">
+<link href=\"/SRC2/cssmtmenu/style.css\" rel=\"stylesheet\" type=\"text/css\">
+<link href=\"//spoqa.github.io/spoqa-han-sans/css/SpoqaHanSans-kr.css\" rel=\"stylesheet\" type=\"text/css\">
+<link href=\"//misharp.co.kr/subtap.css\" rel=\"stylesheet\" type=\"text/css\">"""
 
-if not st.session_state.messages:
-    if product_context.get("product_name"):
-        welcome = "안녕하세요? 옷 같이 봐드리는 미야언니예요 :) 지금 보시는 상품 기준으로 제가 같이 봐드릴게요. 사이즈, 코디, 배송, 교환 중 뭐부터 이야기해볼까요?"
+NAME_PROMPT = """
+너는 4050 여성 패션 쇼핑몰 미샵의 상품 네이밍 전문가다.
+- 상품 주요 특징을 반영해 상품명을 20개 제안한다.
+- 각 상품명은 공백 포함 최대 18자 이내.
+- 반드시 단어와 단어 사이를 자연스럽게 띄어쓴다.
+- AI 검색, 키워드 검색 모두 고려한다.
+- 디테일/형태/원단/핏 등을 반영한 단어 + 카테고리명을 포함한다.
+- 필요하면 세련되고 여성스러운 단어를 앞에 붙여도 된다.
+- 번호, 설명, 코드펜스 없이 한 줄에 하나씩 20개만 출력한다.
+"""
+
+# -----------------------------
+# Helpers
+# -----------------------------
+def chat_with_retry(*, model: str, messages: List[Dict[str, Any]], temperature: float = 0.3, max_retries: int = 2):
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            return client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=temperature,
+            )
+        except RateLimitError as exc:
+            last_exc = exc
+            if attempt >= max_retries:
+                raise
+            time.sleep(2 * (attempt + 1))
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= max_retries:
+                raise
+            time.sleep(1 * (attempt + 1))
+    raise last_exc
+
+
+def file_to_content_item(uploaded_file):
+    mime = uploaded_file.type or mimetypes.guess_type(uploaded_file.name)[0] or "image/jpeg"
+    data = uploaded_file.read()
+    b64 = base64.b64encode(data).decode("utf-8")
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+
+
+def extract_lines_with_digits(text: str) -> List[str]:
+    out = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if line and re.search(r"\d", line):
+            out.append(line)
+    return out
+
+
+def combine_measurements(top_text: str, bottom_text: str, dress_text: str) -> List[str]:
+    lines = []
+    for block in [top_text, bottom_text, dress_text]:
+        lines.extend(extract_lines_with_digits(block))
+    return lines
+
+
+def count_colors(color_text: str) -> int:
+    if not color_text.strip():
+        return 0
+    text = color_text.replace(" / ", "\n").replace("/", "\n").replace(",", "\n")
+    parts = [re.sub(r"^\s*\d+\s*", "", p).strip() for p in text.splitlines()]
+    return len([p for p in parts if p])
+
+
+def apply_color_count_to_name(product_name: str, color_text: str) -> str:
+    count = count_colors(color_text)
+    suffix = f"({count} color)" if count > 0 else "(color)"
+    name = (product_name or "").strip()
+    name = re.sub(r"\(\s*color\s*\)", suffix, name, flags=re.I)
+    if re.search(r"\(\s*\d+\s*color\s*\)", name, flags=re.I):
+        return name
+    if "( color)" in name:
+        return name.replace("( color)", f" {suffix}")
+    return name
+
+
+def normalize_space(text: str) -> str:
+    return re.sub(r"\s+", " ", (text or "")).strip()
+
+
+def clean_line(line: str) -> str:
+    line = (line or "").strip()
+    line = re.sub(r"^[\-•▪⦁\s]+", "", line)
+    line = re.sub(r"\s+", " ", line)
+    return line.strip()
+
+
+
+
+def _natural_wrap(text: str, min_len: int, max_len: int) -> list[str]:
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if not text:
+        return []
+    words = text.split(' ')
+    lines = []
+    cur = ''
+    for w in words:
+        cand = f"{cur} {w}".strip()
+        if len(cand) <= max_len:
+            cur = cand
+            continue
+        if cur:
+            # if current is too short and next word can fit with slight overflow, keep together once
+            if len(cur) < min_len and len(cand) <= max_len + 4:
+                lines.append(cand)
+                cur = ''
+            else:
+                lines.append(cur)
+                cur = w
+        else:
+            lines.append(w)
+            cur = ''
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+def wrap_text_source(text: str) -> str:
+    return '<br>\n'.join(_natural_wrap(text, 18, 30))
+def wrap_md(text: str) -> str:
+    return '<br>\n'.join(_natural_wrap(text, 16, 24))
+def to_noun(line: str) -> str:
+    s = re.sub(r'\s+', ' ', (line or '').strip())
+    s = s.rstrip('. ')
+    replacements = [
+        ('추천드립니다', ''), ('추천합니다', ''), ('권해드립니다', ''), ('권합니다', ''),
+        ('만족을 드립니다', ''), ('만족을 드릴 선택입니다', ''), ('이상적입니다', ''),
+        ('잘 어울립니다', ''), ('알맞습니다', ''), ('적합합니다', ''), ('좋습니다', ''),
+        ('권해드려요', ''), ('추천드려요', ''),
+    ]
+    for a,b in replacements:
+        s = s.replace(a,b)
+    s = s.replace('원하시는 분께도', '원하시는 분')
+    s = s.replace('원하시는 분께', '원하시는 분')
+    s = s.replace('찾으시는 분께', '찾으시는 분')
+    s = s.replace('고객님께', '분')
+    s = s.replace('고객님', '분')
+    s = s.replace('분께도', '분')
+    s = s.replace('분께', '분')
+    s = s.replace('께도', '')
+    s = s.replace('께', '')
+    s = re.sub(r'\s+', ' ', s).strip(' .')
+    if not s.endswith('분'):
+        if s.endswith('원하시는'):
+            s += ' 분'
+        elif s.endswith('좋아하시는'):
+            s += ' 분'
+        elif s.endswith('찾는'):
+            s += ' 분'
+        else:
+            s += ' 분'
+    return s
+
+
+def clean_md(text: str) -> str:
+    text = re.sub(r'<strong style="font-weight:700 !important;">\[구매 전 꼭 확인해 주세요\]</strong><br>\n(?:.*?<br>\n)+?<br>\n', '', text, flags=re.S)
+    return text
+def ensure_sentence(line: str, ending: str = ".") -> str:
+    line = clean_line(line)
+    if not line:
+        return ""
+    if re.search(r"[.!?…]$", line):
+        return line
+    return line + ending
+
+
+def normalize_list(items: List[str], count: int, quote: bool = False) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for item in items:
+        item = clean_line(item)
+        item = item.replace('"', "").strip()
+        if not item:
+            continue
+        key = re.sub(r"\s+", "", item)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+        if len(out) >= count:
+            break
+    if quote:
+        out = [f'"{x}"' for x in out]
+    return out
+
+
+def normalize_multiline_text(text: str) -> List[str]:
+    if not text:
+        return []
+    text = text.replace("\r", "\n")
+    candidates = []
+    for part in text.split("\n"):
+        part = clean_line(part)
+        if part:
+            candidates.append(part)
+    return candidates
+
+
+def format_measurement_lines(lines: List[str]) -> str:
+    if not lines:
+        return "실측사이즈 정보를 입력해 주세요."
+    formatted = []
+    for line in lines:
+        line = re.sub(r"\s+단위:cm$", "", line).strip()
+        line = re.sub(r"\s+L\s+", "<br>L ", line)
+        line = re.sub(r"\s+M\s+", "<br>M ", line)
+        line = re.sub(r"\s+S\s+", "<br>S ", line)
+        line = re.sub(r"\s+XL\s+", "<br>XL ", line)
+        line = re.sub(r"\s+", " ", line)
+        formatted.append(line)
+    return "<br>".join(formatted) + " (단위: cm)"
+
+
+def result_to_docx_bytes(result_text: str) -> bytes:
+    doc = Document()
+    style = doc.styles["Normal"]
+    style.font.name = "Dotum"
+    style._element.rPr.rFonts.set(qn("w:eastAsia"), "돋움")
+    style.font.size = Pt(10)
+    style.paragraph_format.space_before = Pt(0)
+    style.paragraph_format.space_after = Pt(0)
+    style.paragraph_format.line_spacing = 1.5
+
+    for line in result_text.splitlines():
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after = Pt(0)
+        p.paragraph_format.line_spacing = 1.5
+        run = p.add_run(line)
+        run.font.name = "Dotum"
+        run._element.rPr.rFonts.set(qn("w:eastAsia"), "돋움")
+        run.font.size = Pt(10)
+
+    bio = io.BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio.getvalue()
+
+
+def reset_all():
+    st.session_state.reset_nonce += 1
+    st.session_state.naming_result = ""
+    st.session_state.naming_input_value = ""
+    st.session_state.generated_result = ""
+    st.session_state.generated_docx = b""
+    st.session_state.generated_file_stem = "page_builder"
+
+
+def build_generation_prompt(data: Dict[str, str], additional_request: str) -> str:
+    sample_format = """
+출력폼 구조 핵심:
+- 상단 헤더: 상품명 / 컬러 / 사이즈 / 소재 / 소재설명 / 제조국
+- 포인트 원고(포토샵 작업): 현재는 비워 둔다.
+- 텍스트 소스: 추천 4줄 / 착용후기 4줄 / FAQ 4개 / 쇼핑참고 3줄
+- MD원고: [이 상품을 초이스한 이유입니다.] / [원단과 두께 체감에 대하여] / [체형과 핏, 사이즈 선택 가이드] / [이렇게 입는 날이 많아집니다] / [구매 전 꼭 확인해 주세요] + 마무리 3줄
+- 사이즈 팁: 55 / 66 / 66반 / 77 각 1문장
+"""
+    return f"""
+너는 10년 이상 4050 여성 패션몰 미샵 상세페이지를 써 온 최고 수준의 한국어 커머스 카피라이터다.
+단순 요약이 아니라, 실제 고객이 망설이는 이유를 먼저 해소하고 구매를 돕는 고급 원고를 작성한다.
+SEO/AEO/GEO를 고려해 상품명, 카테고리, 소재, 핏, 활용 장면, 고객 니즈를 자연스럽게 녹인다.
+
+중요 원칙
+1) 입력 문구를 그대로 복붙하지 말고 반드시 자연스럽고 매력적인 문장으로 재작성한다.
+2) 없는 디테일은 절대 만들지 않는다. 타이/스카프/포켓/단추/절개/비침/스트랩 등은 입력 또는 이미지 근거가 있을 때만 언급한다.
+3) FAQ는 고객 입장에서 실제로 물을 질문으로 쓴다. 단순한 "77까지 맞나요" 같은 기계적 질문 금지.
+4) 추천/후기/MD원고/사이즈팁 모두 TPO, 고객 pain point, 착용 장면, 체형 고민을 반영한다.
+5) 문장은 너무 짧게 끊지 말고, 한 줄 단위로 보기 좋게 정리한다.
+6) 결과는 반드시 JSON만 출력한다. 코드펜스 금지.
+
+{sample_format}
+
+입력 데이터
+- 상품명: {data['display_name']}
+- 컬러: {data['color']}
+- 사이즈: {data['size']}
+- 소재: {data['material']}
+- 소재설명 참고메모: {data['material_desc_raw']}
+- 디테일 특징: {data['detail_tip']}
+- 핏/실루엣: {data['fit']}
+- 주요 어필 포인트: {data['appeal_points']}
+- 기타 특징: {data['etc']}
+- 타겟: {data['target']}
+- 세탁방법: {data['washing']}
+- 실측사이즈: {' / '.join(data['measurement_lines'])}
+- 추가/수정 요청사항: {additional_request or '없음'}
+
+JSON 스키마
+{{
+  "material_desc_lines": ["문장", "문장", "문장"],
+  "recommend_lines": ["문장", "문장", "문장", "문장"],
+  "review_lines": ["문장", "문장", "문장", "문장"],
+  "faqs": [
+    {{"q": "질문", "a": "답변"}},
+    {{"q": "질문", "a": "답변"}},
+    {{"q": "질문", "a": "답변"}},
+    {{"q": "질문", "a": "답변"}}
+  ],
+  "shopping_lines": ["문장", "문장", "문장"],
+  "md_sections": {{
+    "choice": ["문장", "문장", "문장", "문장"],
+    "fabric": ["문장", "문장", "문장", "문장"],
+    "fit": ["문장", "문장", "문장", "문장"],
+    "occasion": ["문장", "문장", "문장", "문장"],
+    "purchase_note": ["문장", "문장", "문장", "문장"],
+    "ending": ["문장", "문장", "문장"]
+  }},
+  "size_tips": {{
+    "55": "한 문장",
+    "66": "한 문장",
+    "66half": "한 문장",
+    "77": "한 문장"
+  }}
+}}
+
+작성 기준
+- material_desc_lines: 3줄 권장. 소재 장점과 표면감, 계절감, 관리 포인트를 자연스럽게.
+- recommend_lines: 고객 유형 중심으로 4줄.
+- review_lines: 실제 미샵 스탭이 말할 법한 자연스러운 후기로 4줄.
+- faqs: 각 질문은 구체적으로. 예) 가슴이 있는 77 체형, 밝은 컬러 비침, 하루 종일 구김, TPO 활용, 관리법 등.
+- shopping_lines: 꼭 확인해야 할 실용 정보 3줄.
+- md_sections.choice: 왜 이 상품을 골라야 하는지 설득형.
+- md_sections.fabric: 소재와 두께감을 설명형으로.
+- md_sections.fit: 체형, 실루엣, 사이즈 선택에 도움 되는 내용.
+- md_sections.occasion: 언제 어떻게 입는지 장면 중심으로.
+- md_sections.purchase_note: 비침/세탁/디테일/사이즈 확인 등 구매 전 체크사항.
+- md_sections.ending: 감성 과장 없이 미샵 톤으로 3줄.
+- size_tips: 각 체형별로 실제 입었을 때 느낌을 한 문장으로.
+"""
+
+
+def extract_json(text: str) -> Dict[str, Any]:
+    text = (text or "").strip()
+    text = re.sub(r"^```(?:json)?", "", text).strip()
+    text = re.sub(r"```$", "", text).strip()
+    if text.startswith("{") and text.endswith("}"):
+        return json.loads(text)
+    m = re.search(r"\{[\s\S]*\}", text)
+    if not m:
+        raise ValueError("JSON 응답을 찾지 못했습니다.")
+    return json.loads(m.group(0))
+
+
+def smart_faq_defaults(data: Dict[str, str]) -> List[Dict[str, str]]:
+    size = clean_line(data.get("size") or "FREE 사이즈로 77까지 추천드립니다.")
+    product = data.get("display_name") or "상품"
+    color = data.get("color") or ""
+    detail = normalize_space(data.get("detail_tip") or "")
+    fit = normalize_space(data.get("fit") or "")
+    material_desc = normalize_space(data.get("material_desc_raw") or "")
+    bright = "아이보리" in color or "화이트" in color or "밝" in material_desc
+    has_detachable = bool(re.search(r"탈부착|분리", detail))
+    faq = [
+        {"q": "Q. 가슴이 있는 77 체형인데 답답하지 않게 입을 수 있을까요?", "a": f"A. {size} 기준으로 여유 있게 착용하실 수 있도록 안내드리며, 실측사이즈를 함께 보시면 더 정확한 선택에 도움이 됩니다."},
+        {"q": "Q. 하루 종일 입으면 구김이 심하게 남는 편인가요?", "a": "A. 소재 특성상 비교적 깔끔한 인상을 유지하기 좋은 편이라 출근룩이나 모임룩으로도 부담이 적습니다."},
+        {"q": "Q. 밝은 컬러라 비침이 많이 느껴질까요?", "a": "A. 밝은 컬러 계열은 약간의 비침이 있을 수 있어 스킨톤 이너와 함께 착용하시면 훨씬 안정감 있게 입으실 수 있습니다." if bright else "A. 컬러와 소재 특성상 과한 부담 없이 입기 좋지만, 밝은 이너보다 톤을 맞춰 주시면 더 깔끔하게 연출됩니다."},
+        {"q": "Q. 데일리로 입기 쉬운 스타일인가요, 아니면 격식 있는 자리에 더 잘 어울릴까요?", "a": f"A. {product}은 데님, 슬랙스, 스커트 등과 두루 잘 어울려 데일리부터 오피스룩, 모임룩까지 자연스럽게 활용하시기 좋습니다."},
+    ]
+    if has_detachable:
+        faq[3] = {"q": "Q. 디테일이 과해 보이지 않을까요? 탈부착 연출도 가능한가요?", "a": "A. 포인트는 은은하게 살아 있으면서도 전체 분위기는 정돈되어 보여 부담이 적고, 디테일 연출 폭도 넓어 활용도가 높습니다."}
+    if fit:
+        faq[0]["a"] = f"A. {size} 기준으로 안내드리며, {fit} 특성이 있어 체형을 비교적 편안하게 감싸주는 편입니다. 실측사이즈를 함께 보시면 더 정확합니다."
+    return faq
+
+
+def fallback_structured(data: Dict[str, str]) -> Dict[str, Any]:
+    product = data.get("display_name") or "상품"
+    size = clean_line(data.get("size") or "FREE 사이즈로 77까지 추천드립니다.")
+    material_desc_raw = data.get("material_desc_raw") or ""
+    material_lines = normalize_multiline_text(material_desc_raw)[:3]
+    if not material_lines:
+        material_lines = [
+            "부드러운 터치감으로 피부에 닿는 느낌이 편안한 소재입니다.",
+            "표면감이 차분하게 정리되어 데일리로 활용하기 좋습니다.",
+            "관리 부담이 크지 않아 손이 자주 가는 아이템입니다.",
+        ]
     else:
-        welcome = "안녕하세요? 옷 같이 봐드리는 미야언니예요 :) 지금은 일반 상담 모드예요. 상품 상세페이지에서 채팅창을 열면 그 상품 기준으로 더 정확하게 상담해드릴 수 있어요 :) 이 창을 닫고 해당 상품 상세페이지에서 채팅창을 다시 클릭해주세요^^"
-    st.session_state.messages.append({"role": "assistant", "content": welcome})
+        material_lines = [ensure_sentence(x) for x in material_lines]
 
-def render_message(role: str, content: str):
-    role_class = "assistant" if role == "assistant" else "user"
-    label = "미야언니" if role == "assistant" else "고객님"
-    safe_content = html.escape(content).replace("\n", "<br>")
-    st.markdown(
-        f"""
-        <div class="miya-row {role_class}">
-          <div class="miya-msgbox">
-            <div class="miya-label">{label}</div>
-            <div class="miya-bubble">{safe_content}</div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    fit_text = normalize_space(data.get("fit") or "")
+    detail_text = normalize_space(data.get("detail_tip") or "")
+    appeal_text = normalize_space(data.get("appeal_points") or "")
+    etc_text = normalize_space(data.get("etc") or "")
+
+    recommend = [
+        "출근룩부터 모임룩까지 단정하게 입을 아이템을 찾으시는 분",
+        "상체 라인을 부담 없이 정리해 주는 편안한 핏을 선호하시는 분",
+        "소재감이 주는 고급스러운 분위기를 중요하게 보시는 분",
+        "데님, 슬랙스, 스커트와 두루 잘 어울리는 상의를 원하시는 분",
+    ]
+    reviews = [
+        "입었을 때 전체 실루엣이 차분하게 정리돼서 손이 자주 가요.",
+        "촉감이 부담스럽지 않아 하루 종일 입어도 편안한 느낌이에요.",
+        "격식 있는 자리에도 과하지 않게 잘 어울려 활용도가 높아요.",
+        "구김 부담이 크지 않아 바쁜 날에도 깔끔하게 입기 좋았어요.",
+    ]
+    shopping = [
+        f"{size}",
+        "밝은 컬러 계열은 스킨톤 이너와 함께 착용하시면 더 안정감 있게 연출하실 수 있습니다.",
+        "실측사이즈를 함께 확인하시면 원하는 핏으로 선택하시기 더 좋습니다.",
+    ]
+    if detail_text:
+        reviews[2] = f"{detail_text} 포인트가 과하지 않게 살아 있어 단독으로 입어도 충분히 멋스러워요."
+    if fit_text:
+        recommend[1] = f"{fit_text}처럼 체형을 자연스럽게 감싸주는 실루엣을 선호하시는 분"
+    if appeal_text:
+        recommend[2] = f"{appeal_text} 같은 실용 포인트를 중요하게 보시는 분"
+
+    md_choice = [
+        f"{product}은 과하게 꾸민 느낌 없이도 차분하고 세련된 인상을 만들어 줍니다.",
+        "기본에 가까운 디자인일수록 소재와 핏의 차이가 크게 드러나는데, 이 아이템은 그 균형감이 특히 좋습니다.",
+        fit_text + " 장점이 자연스럽게 살아 있어 부담 없이 손이 갑니다." if fit_text else "체형을 부드럽게 감싸주는 실루엣이 안정감 있게 느껴집니다.",
+        etc_text + " 장점까지 더해져 소장 만족도를 높여줍니다." if etc_text else "데일리와 격식을 오가는 장면에서 활용도가 높아 추천드리기 좋습니다.",
+    ]
+    md_fabric = material_lines + ["두께감 또한 과하게 무겁지 않아 계절감에 맞춰 손쉽게 매치하시기 좋습니다."]
+    md_fit = [
+        f"{size} 기준으로 안내드리며, 전체적으로 답답하지 않게 착용하시기 좋은 편입니다.",
+        fit_text + " 장점이 자연스럽게 드러나 체형 고민을 덜어줍니다." if fit_text else "어깨선과 품이 과하게 붙지 않아 상체 라인이 비교적 편안해 보입니다.",
+        detail_text + " 요소가 있다면 전체 라인을 한층 더 정돈돼 보이게 도와줍니다." if detail_text else "실루엣이 과하게 흐트러지지 않아 단정한 분위기를 유지하기 좋습니다.",
+        "실측사이즈를 함께 확인하시면 원하는 핏으로 선택하시기 더 수월합니다.",
+    ]
+    md_occasion = [
+        "출근룩처럼 단정함이 필요한 날에도 무리 없이 입기 좋습니다.",
+        "모임이나 식사 자리처럼 차려입은 느낌이 필요한 순간에도 자연스럽게 어울립니다.",
+        "데님, 슬랙스, 스커트와 두루 매치하기 쉬워 코디 폭이 넓습니다.",
+        "아우터 안에 받쳐 입거나 단독으로 연출해도 분위기가 흐트러지지 않습니다.",
+    ]
+    md_purchase = [
+        f"{size}",
+        "밝은 컬러 계열은 스킨톤 이너를 함께 입어주시면 더 깔끔하게 연출됩니다.",
+        clean_line(data.get("washing") or "드라이클리닝, 단독 울세탁, 손세탁 권장. 건조기 사용 금지") + ".",
+        "실측사이즈와 평소 선호하시는 핏을 함께 비교해 보시길 권해드립니다.",
+    ]
+    md_ending = [
+        "기본 아이템일수록 오래 입기 좋은 밸런스가 중요합니다.",
+        f"{product}은 그런 기준에 잘 맞는 데일리 상의로 추천드릴 만합니다.",
+        "한 벌만으로도 차분하고 세련된 분위기를 완성해 보세요.",
+    ]
+
+    return {
+        "material_desc_lines": material_lines,
+        "recommend_lines": recommend,
+        "review_lines": reviews,
+        "faqs": smart_faq_defaults(data),
+        "shopping_lines": shopping,
+        "md_sections": {
+            "choice": md_choice[:4],
+            "fabric": md_fabric[:4],
+            "fit": md_fit[:4],
+            "occasion": md_occasion[:4],
+            "purchase_note": md_purchase[:4],
+            "ending": md_ending[:3],
+        },
+        "size_tips": {
+            "55": "전체적으로 여유 있는 느낌으로 떨어져 단독 착용 시에도 부담 없이 활용하시기 좋습니다.",
+            "66": "품과 실루엣이 가장 안정감 있게 정리되어 데일리부터 모임룩까지 자연스럽게 이어집니다.",
+            "66half": "상체를 비교적 편안하게 감싸 주는 편이라 체형 고민을 덜고 입기 좋습니다.",
+            "77": "답답하게 조이지 않고 여유 있게 착용 가능한 편으로 실측 확인 후 선택하시면 만족도가 높습니다.",
+        },
+    }
+
+
+def generate_structured_copy(data: Dict[str, str], additional_request: str, uploaded_images) -> Dict[str, Any]:
+    prompt = build_generation_prompt(data, additional_request)
+    user_content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for img in uploaded_images[:5] if uploaded_images else []:
+        user_content.append(file_to_content_item(img))
+
+    response = chat_with_retry(
+        model="gpt-4.1",
+        messages=[
+            {"role": "system", "content": "사용자가 입력한 추가/수정 요청사항은 최우선으로 반드시 반영해야 한다."},
+            {"role": "system", "content": "반드시 JSON만 출력한다. 없는 디테일은 추정하지 않는다. 입력 문구를 그대로 반복하지 말고 고객 니즈 중심의 매력적인 한국어 문장으로 재작성한다."},
+            {"role": "user", "content": user_content},
+        ],
+        temperature=0.55,
+        max_retries=2,
+    )
+    return extract_json(response.choices[0].message.content)
+
+
+def safe_lines(value: Any, count: int, fallback: List[str], quote: bool = False) -> List[str]:
+    items = value if isinstance(value, list) else []
+    if quote:
+        normalized = normalize_list(items, count, quote=False)
+        if len(normalized) < count:
+            normalized += [x for x in fallback if x not in normalized]
+        normalized = normalized[:count]
+        return [f'"{x.replace(chr(34), "").strip()}"' for x in normalized]
+    normalized = normalize_list(items, count)
+    if len(normalized) < count:
+        for item in fallback:
+            c = clean_line(item)
+            if c and c not in normalized:
+                normalized.append(c)
+            if len(normalized) >= count:
+                break
+    return normalized[:count]
+
+
+def safe_faqs(value: Any, fallback: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    out = []
+    items = value if isinstance(value, list) else []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        q = clean_line(item.get("q", ""))
+        a = clean_line(item.get("a", ""))
+        if not q or not a:
+            continue
+        if not q.startswith("Q."):
+            q = "Q. " + q
+        if not a.startswith("A."):
+            a = "A. " + a
+        out.append({"q": q, "a": a})
+        if len(out) >= 4:
+            break
+    for item in fallback:
+        if len(out) >= 4:
+            break
+        q = item["q"]
+        if all(q != x["q"] for x in out):
+            out.append(item)
+    return out[:4]
+
+
+def normalize_generated(result: Dict[str, Any], data: Dict[str, str]) -> Dict[str, Any]:
+    fallback = fallback_structured(data)
+    material_desc_lines = safe_lines(result.get("material_desc_lines"), 3, fallback["material_desc_lines"])
+    recommend_lines = safe_lines(result.get("recommend_lines"), 4, fallback["recommend_lines"])
+    review_lines = safe_lines(result.get("review_lines"), 4, fallback["review_lines"], quote=True)
+    faqs = safe_faqs(result.get("faqs"), fallback["faqs"])
+    shopping_lines = safe_lines(result.get("shopping_lines"), 3, fallback["shopping_lines"])
+
+    md_raw = result.get("md_sections") if isinstance(result.get("md_sections"), dict) else {}
+    md_sections = {
+        "choice": safe_lines(md_raw.get("choice"), 4, fallback["md_sections"]["choice"]),
+        "fabric": safe_lines(md_raw.get("fabric"), 4, fallback["md_sections"]["fabric"]),
+        "fit": safe_lines(md_raw.get("fit"), 4, fallback["md_sections"]["fit"]),
+        "occasion": safe_lines(md_raw.get("occasion"), 4, fallback["md_sections"]["occasion"]),
+        "purchase_note": safe_lines(md_raw.get("purchase_note"), 4, fallback["md_sections"]["purchase_note"]),
+        "ending": safe_lines(md_raw.get("ending"), 3, fallback["md_sections"]["ending"]),
+    }
+
+    tips_raw = result.get("size_tips") if isinstance(result.get("size_tips"), dict) else {}
+    size_tips = {
+        "55": ensure_sentence(tips_raw.get("55", fallback["size_tips"]["55"])),
+        "66": ensure_sentence(tips_raw.get("66", fallback["size_tips"]["66"])),
+        "66half": ensure_sentence(tips_raw.get("66half", fallback["size_tips"]["66half"])),
+        "77": ensure_sentence(tips_raw.get("77", fallback["size_tips"]["77"])),
+    }
+
+    return {
+        "material_desc_lines": [ensure_sentence(x) for x in material_desc_lines],
+        "recommend_lines": [ensure_sentence(x) for x in recommend_lines],
+        "review_lines": review_lines,
+        "faqs": faqs,
+        "shopping_lines": [ensure_sentence(x) for x in shopping_lines],
+        "md_sections": {k: [ensure_sentence(x) for x in v] for k, v in md_sections.items()},
+        "size_tips": size_tips,
+    }
+
+
+def build_subtap_html(data: Dict[str, str], material_desc_lines: List[str]) -> str:
+    material_items = [x.strip() for x in (data["material"] or "").split("+") if x.strip()]
+    material_line = " + ".join(material_items) if material_items else "소재 정보 입력 필요"
+    if "(건조기사용금지)" not in material_line:
+        material_line = f"{material_line} (건조기사용금지)"
+    washing = (data["washing"] or "").strip() or "드라이클리닝, 단독 울세탁, 손세탁 권장. 건조기 사용 금지"
+    size_tip = (data["size"] or "").strip() or "FREE 사이즈로 77까지 추천드립니다."
+    measurement_html = format_measurement_lines(data["measurement_lines"])
+    material_desc_html = "<br>\n\t\t\t\t\t\t\t\t\t".join(material_desc_lines) + "<br>"
+
+    return f"""<div id=\"Subtap\">
+\t<div id=\"header2\" role=\"banner\">
+\t\t<nav class=\"nav\" role=\"navigation\">
+\t\t\t<ul class=\"nav__list\">
+\t\t\t\t<li>
+\t\t\t\t\t<input id=\"group-1\" type=\"checkbox\" hidden=\"\">
+\t\t\t\t\t<label for=\"group-1\" style=\"border-top-color: rgb(204, 204, 204); border-top-width: 1px; border-top-style: solid;\">
+\t\t\t\t\t\t<p class=\"fa fa-angle-right\"></p>소재 정보</label>
+\t\t\t\t\t<ul class=\"group-list\">
+\t\t\t\t\t\t<li>
+\t\t\t\t\t\t\t<a href=\"#\">
+\t\t\t\t\t\t\t\t<h3>소재 : {material_line}</h3>
+\t\t\t\t\t\t\t\t<p>
+\t\t\t\t\t\t\t\t\t{material_desc_html}
+\t\t\t\t\t\t\t\t</p>
+\t\t\t\t\t\t\t\t<h3>세탁방법</h3>
+\t\t\t\t\t\t\t\t<p>{washing}</p>
+\t\t\t\t\t\t\t</a>
+\t\t\t\t\t\t</li>
+\t\t\t\t\t</ul>
+\t\t\t\t</li>
+\t\t\t\t<li>
+\t\t\t\t\t<input id=\"group-2\" type=\"checkbox\" hidden=\"\">
+\t\t\t\t\t<label for=\"group-2\">
+\t\t\t\t\t\t<p class=\"fa fa-angle-right\"></p>사이즈 정보</label>
+\t\t\t\t\t<ul class=\"group-list gray\">
+\t\t\t\t\t\t<li>
+\t\t\t\t\t\t\t<a href=\"#\">
+\t\t\t\t\t\t\t\t<h3>사이즈 TIP</h3>
+\t\t\t\t\t\t\t\t<p>{size_tip}</p>
+\t\t\t\t\t\t\t\t<h3>길이 TIP</h3>
+\t\t\t\t\t\t\t\t<p>162-167cm에서는 모델핏을 참고해 주시고,
+<br> 다리 길이나 체형에 따라 다르지만,
+<br> 160cm이하에서는 모델의 핏보다 조금 길게
+<br> 연출됩니다.</p>
+\t\t\t\t\t\t\t</a>
+\t\t\t\t\t\t</li>
+\t\t\t\t\t</ul>
+\t\t\t\t</li>
+\t\t\t\t<li>
+\t\t\t\t\t<input id=\"group-3\" type=\"checkbox\" hidden=\"\">
+\t\t\t\t\t<label for=\"group-3\">
+\t\t\t\t\t\t<p class=\"fa fa-angle-right\"></p>실측 사이즈</label>
+\t\t\t\t\t<ul class=\"group-list\">
+\t\t\t\t\t\t<li>
+\t\t\t\t\t\t\t<a href=\"#\">
+\t\t\t\t\t\t\t\t<p>{measurement_html}</p>
+\t\t\t\t\t\t\t</a>
+\t\t\t\t\t\t</li>
+\t\t\t\t\t</ul>
+\t\t\t\t</li>
+\t\t\t\t<li>
+\t\t\t\t\t<input id=\"group-5\" type=\"checkbox\" hidden=\"\">
+\t\t\t\t\t<label for=\"group-5\"><span class=\"fa fa-angle-right\"></span>
+\t\t\t\t\t\t<a href=\"#crema-product-fit-1\" style=\"padding: 0px; box-shadow:none; background:#f7f7f7;\">실측사이즈 재는방법</a></label>
+\t\t\t\t</li>
+\t\t\t</ul>
+\t\t</nav>
+\t</div>
+</div>"""
+
+
+def render_text_source(structured: Dict[str, Any]) -> str:
+    rec_lines = ''.join([f"▪ {wrap_text_source(to_noun(x))}<br>\n" for x in structured['recommend_lines']])
+    review_lines = ''.join([f'"{wrap_text_source(clean_line(x))}"<br>\n' for x in structured['review_lines']])
+    faq_lines = []
+    for idx, faq in enumerate(structured['faqs']):
+        q = wrap_text_source(clean_line(faq['q']))
+        a = wrap_text_source(clean_line(faq['a']))
+        faq_lines.append(f"Q. {q}<br>\n")
+        faq_lines.append(f"A. {a}<br>\n")
+        if idx < len(structured['faqs']) - 1:
+            faq_lines.append("<br>\n")
+    shopping_lines = ''.join([f"▪ {wrap_text_source(clean_line(x))}<br>\n" for x in structured['shopping_lines']])
+
+    return (
+        '<div style="text-align:center;">\n'
+        '<h3 style="margin-bottom:0;">\n'
+        '✓ 이런 분께 추천해요!</h3>\n'
+        '<br>\n'
+        '<p><span style="font-size:14px; line-height:1.8;">\n'
+        f'{rec_lines}'
+        '</span></p></div>\n'
+        '<br><br><br><br>\n\n'
+        '<div style="text-align:center;">\n'
+        '<h3 style="margin-bottom:0;">\n'
+        '✓ 미리 입어 본 착용후기 (모델/스텝/MD리뷰)</h3>\n'
+        '<br>\n'
+        '<p><span style="font-size:14px; line-height:1.8;">\n'
+        f'{review_lines}'
+        '</span></p></div>\n'
+        '<br><br><br>\n\n'
+        '<div style="text-align:center;">\n'
+        '<h3 style="margin-bottom:0;">\n'
+        '✓ (FAQ) 이 상품, 이게 궁금해요!</h3>\n'
+        '<br>\n'
+        '<p><span style="font-size:14px; line-height:1.4;">\n'
+        f'{"".join(faq_lines)}'
+        '</span></p></div>\n'
+        '<br><br><br><br>\n\n'
+        '<div style="text-align:center;">\n'
+        '<h3 style="margin-bottom:0;">\n'
+        '✓ 쇼핑에 꼭 참고하세요</h3>\n'
+        '<br>\n'
+        '<p><span style="font-size:14px; line-height:1.8;">\n'
+        f'{shopping_lines}'
+        '</span></p></div>\n'
+        '<br><br><br>'
     )
 
-st.markdown('<div class="miya-chat-wrap">', unsafe_allow_html=True)
-for msg in st.session_state.messages:
-    render_message(msg.get("role", "assistant"), msg.get("content", ""))
-st.markdown('</div>', unsafe_allow_html=True)
+def render_subsc_html(data: Dict[str, str], structured: Dict[str, Any]) -> str:
+    md = structured['md_sections']
 
-user_input = st.chat_input("메시지를 입력하세요...")
-if user_input:
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    write_chat_log("user_message", user_text=user_input, response_mode="user_message", product_context=product_context)
-    answer = process_user_message(user_input, product_context, db_product)
-    st.session_state.messages.append({"role": "assistant", "content": answer})
-    st.session_state.last_answer = answer
-    st.rerun()
+    def join_lines(lines: List[str]) -> str:
+        return ''.join([f"{wrap_md(clean_line(x))}<br>\n" for x in lines if clean_line(x)])
+
+    html = (
+        '<div id="subsc">\n'
+        f'<h3>{data["display_name"]}</h3>\n'
+        '<p>\n'
+        '<strong style="font-weight:700 !important;">[이 상품을 초이스한 이유입니다.]</strong><br>\n'
+        f'{join_lines(md["choice"])}'
+        '<br>\n'
+        '<strong style="font-weight:700 !important;">[원단과 두께 체감에 대하여]</strong><br>\n'
+        f'{join_lines(md["fabric"])}'
+        '<br>\n'
+        '<strong style="font-weight:700 !important;">[체형과 핏, 사이즈 선택 가이드]</strong><br>\n'
+        f'{join_lines(md["fit"])}'
+        '<br>\n'
+        '<strong style="font-weight:700 !important;">[이렇게 입는 날이 많아집니다]</strong><br>\n'
+        f'{join_lines(md["occasion"])}'
+        '<br>\n'
+        '</p></div>'
+    )
+    return clean_md(html)
+
+def assemble_final_output(data: Dict[str, str], structured: Dict[str, Any]) -> str:
+    material_items = [x.strip() for x in (data['material'] or '').split('+') if x.strip()]
+    material_line = ' + '.join(material_items) if material_items else data['material']
+    if '(건조기사용금지)' not in material_line:
+        material_line = f'{material_line} (건조기사용금지)'
+
+    text_source = render_text_source(structured)
+    subsc_html = render_subsc_html(data, structured)
+    subtap_html = build_subtap_html(data, structured['material_desc_lines'])
+    source_block = FIXED_HTML_HEAD + '\n\n' + subsc_html + '\n\n' + subtap_html
+
+    lines: List[str] = []
+    lines.append(f"상품명 : {data['display_name']}")
+    lines.append('')
+    lines.append(f"컬러 : {data['color']}")
+    lines.append(f"사이즈 : {data['size']}")
+    lines.append(f"소재 : {material_line}")
+    lines.append('소재설명 :')
+    for x in structured['material_desc_lines']:
+        lines.append(f'- {x}')
+    lines.append(f"제조국 : {data['country']}")
+    lines.append('')
+    lines.append('-----------------')
+    lines.append('포인트 원고(포토샵 작업)')
+    lines.append('-----------------')
+    lines.extend([''] * 11)
+    lines.append('---------------------------------')
+    lines.append('텍스트 소스')
+    lines.append('---------------------------------')
+    lines.append('')
+    lines.append(text_source)
+    lines.append('')
+    lines.append('----------------------------------')
+    lines.append('MD원고(상품 설명 소스)')
+    lines.append('----------------------------------')
+    lines.append(source_block)
+    lines.append('')
+    lines.append('-----------------')
+    lines.append('사이즈 팁')
+    lines.append('-----------------')
+    lines.append('')
+    lines.append('ㅇ55 (90) 160cm 48kg')
+    lines.append(structured['size_tips']['55'])
+    lines.append('')
+    lines.append('ㅇ66 (95) 165cm 54kg')
+    lines.append(structured['size_tips']['66'])
+    lines.append('')
+    lines.append('ㅇ66반 (95) 164cm 58kg')
+    lines.append(structured['size_tips']['66half'])
+    lines.append('')
+    lines.append('ㅇ77 (100) 163cm 61kg')
+    lines.append(structured['size_tips']['77'])
+    return '\n'.join(lines).strip()
+
+
+# -----------------------------
+# UI
+# -----------------------------
+st.markdown("---")
+st.subheader("상품 네이밍")
+ncol1, ncol2 = st.columns([5, 1], vertical_alignment="bottom")
+with ncol1:
+    naming_input = st.text_area(
+        "상품 주요특징 입력",
+        height=120,
+        placeholder="예: 여리핏, 부드러운 엠보 텍스처, 상체 군살 커버, 루즈핏 맨투맨",
+        key="naming_input_value",
+    )
+with ncol2:
+    if st.button("네이밍 생성", use_container_width=True):
+        if naming_input.strip():
+            with st.spinner("상품명을 생성 중입니다..."):
+                try:
+                    response = chat_with_retry(
+                        model="gpt-4.1",
+                        messages=[
+                            {"role": "system", "content": NAME_PROMPT},
+                            {"role": "user", "content": naming_input},
+                        ],
+                        temperature=0.5,
+                        max_retries=2,
+                    )
+                    st.session_state.naming_result = response.choices[0].message.content.strip()
+                    st.rerun()
+                except RateLimitError:
+                    st.error("현재 OpenAI 요청이 일시적으로 몰려 네이밍 생성을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요.")
+                except Exception as e:
+                    st.error(f"네이밍 생성 중 오류가 발생했습니다: {e}")
+        else:
+            st.warning("상품 주요특징을 입력해 주세요.")
+
+st.text_area("상품 네이밍 제안 20개", value=st.session_state.naming_result, height=250)
+st.markdown("---")
+
+h1, h2 = st.columns([2.2, 1.0], vertical_alignment="bottom")
+with h1:
+    st.subheader("상품정보 입력")
+with h2:
+    st.button("초기화", use_container_width=True, on_click=reset_all)
+
+nonce = st.session_state.reset_nonce
+left, right = st.columns(2)
+
+with left:
+    product_name = st.text_input("상품명", value="( color)", key=f"product_name_{nonce}")
+    color = st.text_input("컬러", placeholder="예: 1 먹 / 2 블랙", key=f"color_{nonce}")
+    size = st.text_area("사이즈", height=90, value="FREE 사이즈로 77까지 추천드립니다.", key=f"size_{nonce}")
+    material = st.text_input("소재", placeholder="예: 폴리에스터70 + 레이온27 + 스판3", key=f"material_{nonce}")
+    material_desc = st.text_area("소재설명", height=110, placeholder="예: 후들후들 가볍고 부드러운 무광의 소재\n예: 비침이나 구김에 강하고 유연한 핏 연출", key=f"material_desc_{nonce}")
+    country = st.text_input("제조국", key=f"country_{nonce}")
+    top_measure = st.text_area("상의 실측사이즈", height=120, value="어깨단면 / 가슴둘레 / 암홀둘레 / 소매길이 / 소매둘레 / 총장 / 총장(앞) / 총장(뒤)  단위:cm", key=f"top_measure_{nonce}")
+    bottom_measure = st.text_area("하의 실측사이즈", height=110, value="F 허리둘레 / 엉덩이둘레 / 허벅지둘레 / 밑단둘레 / 총장 / 밑위 길이  단위:cm\nL 허리둘레 / 엉덩이둘레 / 허벅지둘레 / 밑단둘레 / 총장 / 밑위 길이  단위:cm", key=f"bottom_measure_{nonce}")
+    dress_measure = st.text_area("원피스 실측사이즈", height=130, value="어깨단면 / 가슴둘레 / 허리둘레 / 엉덩이둘레 / 암홀둘레 / 소매길이 / 어깨소매길이 / 총장(앞) / 총장(뒤)  단위:cm", key=f"dress_measure_{nonce}")
+
+with right:
+    detail_tip = st.text_input("디테일 특징 (예:디자인, 절개라인, 부자재, 스펙상 특징 등)", key=f"detail_tip_{nonce}")
+    fit = st.text_input("핏/실루엣 (예:정핏,레귤러핏,오버핏 등/체형커버, 다리길어보이는 등의 특장점)", key=f"fit_{nonce}")
+    appeal_points = st.text_area("주요 어필 포인트 (예:고객 문제해결 포인트,원단 구김-탄력-내구성,체형커버,계절성,기능성,코디활용도 등)", height=150, key=f"appeal_points_{nonce}")
+    etc = st.text_area("기타 특징 (브랜드퀄리티,백화점납품상품,가격경쟁력,가성비,전문거래처 등)", height=120, key=f"etc_{nonce}")
+    target = st.text_input("타겟", value="4050 여성", key=f"target_{nonce}")
+    washing = st.text_input("세탁방법", value="드라이클리닝, 단독 울세탁, 손세탁 권장. 건조기 사용 금지", key=f"washing_{nonce}")
+    additional_request = st.text_area("추가/수정 요청사항(출력물 확인 후 수정사항 입력)", height=120, key=f"additional_request_{nonce}")
+
+st.subheader("이미지 업로드")
+uploaded_images = st.file_uploader("이미지", type=["jpg", "jpeg", "png", "webp"], accept_multiple_files=True, key=f"uploaded_images_{nonce}")
+
+if st.button("생성하기", type="primary", use_container_width=True, key=f"generate_{nonce}"):
+    display_name = apply_color_count_to_name(product_name, color)
+    measurement_lines = combine_measurements(top_measure, bottom_measure, dress_measure)
+    data = {
+        "product_name": product_name,
+        "display_name": display_name,
+        "color": color,
+        "size": size,
+        "material": material,
+        "material_desc_raw": material_desc,
+        "country": country,
+        "measurement_lines": measurement_lines,
+        "detail_tip": detail_tip,
+        "fit": fit,
+        "appeal_points": appeal_points,
+        "etc": etc,
+        "target": target,
+        "washing": washing,
+    }
+
+    with st.spinner("출력물을 생성 중입니다..."):
+        try:
+            structured_raw = generate_structured_copy(data, additional_request, uploaded_images)
+            structured = normalize_generated(structured_raw, data)
+            result = assemble_final_output(data, structured)
+        except RateLimitError:
+            st.error("현재 OpenAI 요청이 일시적으로 몰려 원고 생성을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요.")
+            st.stop()
+        except Exception as e:
+            st.error(f"원고 생성 중 오류가 발생했습니다: {e}")
+            st.stop()
+
+    st.session_state.generated_result = result
+    st.session_state.generated_docx = result_to_docx_bytes(result)
+    st.session_state.generated_file_stem = (display_name or "page_builder").replace(" ", "_")
+
+if st.session_state.generated_result:
+    st.text_area("결과", st.session_state.generated_result, height=1200)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.download_button("TXT 다운로드", data=st.session_state.generated_result, file_name=f"{st.session_state.generated_file_stem}_output.txt", mime="text/plain", use_container_width=True)
+    with c2:
+        st.download_button("HWP 다운로드", data=st.session_state.generated_docx, file_name=f"{st.session_state.generated_file_stem}_output.hwp", mime="application/x-hwp", use_container_width=True)
+
+st.markdown("---")
+st.markdown("© made by MISHARP, MIYAWA. All rights reserved.")
