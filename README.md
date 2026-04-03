@@ -1,1 +1,2 @@
-page builder v1 20260325 fix1
+# miya-ai-v2-final
+Stable chatbot with safe size logic
