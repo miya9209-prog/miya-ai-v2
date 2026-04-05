@@ -23,23 +23,50 @@ if not OPENAI_API_KEY:
 
 client = OpenAI(api_key=OPENAI_API_KEY, timeout=25.0, max_retries=1)
 
-# ── 로깅 ──────────────────────────────────────────────────────────────────────
+# ── 로깅 (구조화 JSONL - 관리프로그램 연동용) ──────────────────────────────────
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
-def get_logger():
-    logger = logging.getLogger("miya_chat")
+def _get_file_logger():
+    logger = logging.getLogger("miya_chat_file")
     if not logger.handlers:
-        log_path = os.path.join(LOG_DIR, "chat_{}.log".format(datetime.now().strftime("%Y%m%d")))
+        log_path = os.path.join(LOG_DIR, "chat_{}.jsonl".format(datetime.now().strftime("%Y%m%d")))
         fh = logging.FileHandler(log_path, encoding="utf-8")
-        fh.setFormatter(logging.Formatter("%(asctime)s\t%(message)s"))
+        fh.setFormatter(logging.Formatter("%(message)s"))
         logger.addHandler(fh)
         logger.setLevel(logging.INFO)
     return logger
 
-def log_chat(role, content, product_no=""):
+def write_log(
+    event_type: str,
+    product_no: str = "",
+    product_name: str = "",
+    user_text: str = "",
+    bot_text: str = "",
+    response_mode: str = "",
+    fallback_reason: str = "",
+    is_fallback: bool = False,
+    error_text: str = "",
+    latency_ms: float = 0,
+    session_id: str = "",
+):
+    """관리프로그램이 바로 파싱 가능한 JSONL 구조화 로그 저장"""
     try:
-        get_logger().info("{}\t{}\t{}".format(role, product_no, str(content)[:300]))
+        record = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "event_type": event_type,
+            "session_id": session_id,
+            "product_no": product_no,
+            "product_name": product_name,
+            "user_text": user_text[:300],
+            "bot_text": bot_text[:400],
+            "response_mode": response_mode,
+            "fallback_reason": fallback_reason,
+            "is_fallback": is_fallback,
+            "error_text": error_text[:300],
+            "latency_ms": round(latency_ms, 1),
+        }
+        _get_file_logger().info(json.dumps(record, ensure_ascii=False))
     except Exception:
         pass
 
@@ -87,7 +114,9 @@ SYSTEM_PROMPT = (
     "3. size_ok가 false면 맞다고 절대 하지 말 것\n"
     "4. confirmed_colors 안에 있는 컬러만 언급\n"
     "5. 데이터 없으면 추측하지 말고 솔직하게 말할 것\n"
-    "6. 상황(학교 방문, 모임 등)이 언급되면 그 상황에 맞는 스타일 조언 포함"
+    "6. 상황(학교 방문, 모임 등)이 언급되면 그 상황에 맞는 스타일 조언 포함\n"
+    "7. user_has_size_input이 false이면 사이즈 관련 판단을 절대 하지 말 것 - 사이즈 입력을 먼저 요청할 것\n"
+    "8. 인사말(안녕, 안녕하세요 등)에는 사이즈나 상품 정보를 먼저 꺼내지 말고 반갑게 인사 후 무엇을 도와드릴지만 물어볼 것"
 )
 
 
@@ -138,12 +167,19 @@ def expand_size_text(size_text: str) -> List[int]:
     return sorted(set(found))
 
 
+def _new_session_id() -> str:
+    """페이지 로드 기준 세션 ID 생성"""
+    import hashlib
+    ts = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    return "sess_" + hashlib.md5(ts.encode()).hexdigest()[:8]
+
 def ensure_state() -> None:
     defaults = {
         "messages": [], "last_context_key": "",
         "body_height": "", "body_weight": "", "body_top": "", "body_bottom": "",
         "is_processing": False, "last_user_hash": "", "last_user_ts": 0.0,
         "last_answer": "", "last_recommendations": [],
+        "session_id": _new_session_id(),  # 관리프로그램 연동용 세션 ID
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -303,11 +339,13 @@ def build_body_context_text(body_ctx: Dict[str, str]) -> str:
 def extract_user_body_from_text(user_text: str) -> Dict[str, str]:
     result = {}
     q = clean_text(user_text)
-    if any(k in q for k in ["키가 작", "키작", "소키"]):
+    if any(k in q for k in ["키가 작", "키작", "소키", "키 작은", "키작은"]):
         result["height_hint"] = "단신"
-    elif any(k in q for k in ["키가 크", "키크"]):
+    elif any(k in q for k in ["키가 크", "키크", "키 큰", "키큰"]):
         result["height_hint"] = "장신"
-    if any(k in q for k in ["상체가 크", "상체크", "상체 있는", "상체있는", "어깨넓", "가슴크"]):
+    # "가슴이 좀 있", "가슴이 있는", "가슴이 크" 등 다양한 표현 포함
+    if any(k in q for k in ["상체가 크", "상체크", "상체 있는", "상체있는", "어깨넓", "가슴크",
+                              "가슴이 좀", "가슴이좀", "가슴이 있", "가슴이있", "가슴이 크"]):
         result["upper_body_hint"] = "상체큰편"
     elif any(k in q for k in ["상체가 작", "상체작", "어깨좁"]):
         result["upper_body_hint"] = "상체작은편"
@@ -330,16 +368,22 @@ def detect_situation_from_text(user_text: str) -> List[str]:
 
 
 def is_size_question(user_text: str) -> bool:
+    # 추천 요청이 포함된 문장은 사이즈 질문으로 분류하지 않음 (추천이 우선)
+    if is_recommendation_question(user_text):
+        return False
     q = user_text.replace(" ", "")
     if any(k in q for k in ["사이즈", "맞을까", "맞을까요", "맞아", "맞나요", "핏", "작을까",
-                              "클까", "여유", "타이트", "내사이즈", "나한테맞", "나에게맞", "입을수있"]):
+                              "클까", "여유", "타이트", "내사이즈", "나한테맞", "나에게맞", "입을수있",
+                              "안맞겠지", "안맞을까", "사이즈안맞"]):
         return True
     if detect_size_from_text(user_text):
         return True
     if re.search(r"이\s*옷.{0,10}(나한테|나에게|맞|어때|어울)", user_text):
         return True
     body_hints = extract_user_body_from_text(user_text)
-    if body_hints and any(k in q for k in ["맞", "어때", "어울", "될까", "입을"]):
+    # 체형 힌트 + 사이즈/핏 관련 의도 키워드가 함께 있을 때만 사이즈 질문으로 판단
+    if body_hints and any(k in q for k in ["맞", "어때", "어울", "될까", "입을", "안맞", "역시"]):
+        # 단, 추천 요청과 겹칠 때는 추천으로 우선 처리 (is_recommendation이 먼저 체크됨)
         return True
     return False
 
@@ -358,7 +402,9 @@ def is_recommendation_question(user_text: str) -> bool:
         "추천", "어울리는", "같이 입", "코디", "매치",
         "다른 바지", "다른 자켓", "다른 옷", "다른 상품", "다른 맨투맨", "다른 셔츠",
         "다른 블라우스", "다른 가디건", "다른 니트", "다른 스커트", "다른 치마",
-        "어떤 바지", "어떤 자켓", "어떤 옷", "잘 어울리는", "비슷한 옷",
+        "다른 점퍼", "다른 아우터", "다른 자켓", "다른 원피스",
+        "어떤 바지", "어떤 자켓", "어떤 옷", "어떤 아우터", "어떤 점퍼",
+        "잘 어울리는", "비슷한 옷", "비슷한 상품",
     ])
 
 
@@ -542,10 +588,18 @@ def row_blob(rowd: Dict) -> str:
 
 def infer_target_category_from_query(user_text: str, current_product: Dict) -> str:
     q = clean_text(user_text)
+    # "점퍼나 자켓", "자켓이나 아우터" 같은 복수 표현 → 아우터(자켓+점퍼 통합)로 처리
+    if any(k in q for k in ["아우터"]):
+        return "아우터"
+    # 자켓+점퍼 함께 언급 → 아우터
+    has_jacket = any(k in q for k in ["자켓", "재킷"])
+    has_jumper = any(k in q for k in ["점퍼", "야상"])
+    if has_jacket and has_jumper:
+        return "아우터"
     for kw, cat in [
         (["바지", "슬랙스", "팬츠", "데님", "청바지"], "팬츠"),
         (["스커트", "치마"], "스커트"),
-        (["자켓", "재킷", "아우터"], "자켓"),
+        (["자켓", "재킷"], "자켓"),
         (["점퍼", "야상"], "점퍼"),
         (["맨투맨", "후드", "스웨트"], "맨투맨"),
         (["블라우스"], "블라우스"),
@@ -557,6 +611,7 @@ def infer_target_category_from_query(user_text: str, current_product: Dict) -> s
     ]:
         if any(k in q for k in kw):
             return cat
+    # 현재 상품 기준으로 반대편 추천
     current_sub = clean_text(current_product.get("sub_category", ""))
     current_cat = clean_text(current_product.get("category", ""))
     if current_sub in BOTTOM_SUB_CATS:
@@ -761,6 +816,16 @@ def recommend_products_for_query(
             if bottom_rank and ranks and bottom_rank not in ranks:
                 continue
             score += 15
+        elif target_category == "아우터":
+            # 자켓 + 점퍼 통합 (아우터 전체)
+            if not (sub in {"자켓", "점퍼"} or any(k in row_name for k in ["자켓", "재킷", "점퍼", "야상", "코트", "패딩"])):
+                continue
+            # 사이즈: top_rank 있으면 체크, 없으면 통과 (사이즈 미입력 시에도 추천 가능)
+            if top_rank and ranks and top_rank not in ranks:
+                continue
+            score += 15
+            if sub == "자켓":
+                score += 3  # 자켓 우선 (선생님 방문 등 단정한 자리에 적합)
         elif target_category == "자켓":
             if not (sub == "자켓" or any(k in row_name for k in ["자켓", "재킷"])):
                 continue
@@ -877,8 +942,12 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
         opener = "네, 이 상품이랑 잘 어울리는 바지 쪽으로 먼저 골라드릴게요."
     elif target_category == "스커트":
         opener = "네, 이 상품 분위기랑 잘 맞는 스커트로 먼저 골라드릴게요."
-    elif target_category in ["자켓", "점퍼"]:
+    elif target_category == "아우터":
+        opener = "네, 고객님 사이즈에 맞는 아우터 쪽으로 먼저 골라드릴게요."
+    elif target_category in ["자켓"]:
         opener = "네, 사이즈에 맞는 자켓 쪽으로 먼저 골라드릴게요."
+    elif target_category == "점퍼":
+        opener = "네, 사이즈에 맞는 점퍼 쪽으로 먼저 골라드릴게요."
     elif target_category == "맨투맨":
         opener = "네, 고객님 사이즈에 맞는 맨투맨으로 골라드릴게요."
     elif is_re_request:
@@ -948,26 +1017,27 @@ def slim_context_for_llm(product_context: Dict, db_product: Optional[Dict], user
     colors = parse_color_options(product_context, db_product)
     body = build_body_context()
     situations = detect_situation_from_text(user_text)
+    # ★ 핵심: 사이즈 입력 없으면 size_ok 아예 전달 안 함 → LLM이 임의 사이즈 추측 방지
     size_eval: Dict = {}
-    if body.get("top_size"):
-        size_eval = evaluate_size_support(clean_text(body.get("top_size", "")), product_context, db_product)
-    recos = []
-    if is_recommendation_question(user_text):
-        target = infer_target_category_from_query(user_text, current)
-        recos = recommend_products_for_query(user_text, current, body, target, 3)
+    top_size = clean_text(body.get("top_size", ""))
+    if top_size:
+        size_eval = evaluate_size_support(top_size, product_context, db_product)
+    db_size_range = clean_text((db_product or {}).get("size_range", ""))
     return {
         "current_product_name": current.get("product_name") or "지금 보시는 상품",
         "current_category": current.get("category", ""),
         "current_sub_category": current.get("sub_category", ""),
         "confirmed_colors": colors[:6],
-        "size_ok": size_eval.get("supported"),
-        "size_reason": trim_text(size_eval.get("reason", ""), 180),
+        # 사이즈 정보: 입력 없으면 null 명시 → LLM이 추측하지 않도록
+        "size_ok": size_eval.get("supported") if top_size else None,
+        "size_reason": trim_text(size_eval.get("reason", ""), 180) if top_size else "",
+        "user_has_size_input": bool(top_size),
+        "db_size_range": trim_text(db_size_range, 80),
         "body_context": body,
         "situations": situations,
         "page_fit": trim_text(product_context.get("fit", ""), 220),
         "page_material": trim_text(product_context.get("material", ""), 180),
-        "db_size_range": trim_text(clean_text((db_product or {}).get("size_range", "")), 80),
-        "allowed_candidates": [r.get("product_name", "") for r in recos],
+        "allowed_candidates": [],
         "policy_db": POLICY_DB,
     }
 
@@ -992,18 +1062,25 @@ def call_llm(user_text: str, product_context: Dict, db_product: Optional[Dict]) 
             if content:
                 return content
         except (RateLimitError, APITimeoutError, APIError) as e:
-            log_chat("LLM_ERROR", str(e))
+            write_log(event_type="error", error_text="LLM_RateLimit: " + str(e)[:200])
             continue
         except Exception as e:
-            log_chat("LLM_ERROR", str(e))
+            write_log(event_type="error", error_text="LLM_Error: " + str(e)[:200])
             break
     return None
 
 
 def llm_can_help(user_text: str) -> bool:
-    if is_name_question(user_text) or is_size_question(user_text) or is_color_question(user_text):
+    # 사이즈/이름/컬러/정책은 결정론적 로직이 처리하므로 LLM 불필요
+    if is_name_question(user_text) or is_color_question(user_text):
         return False
-    return get_fast_policy_answer(user_text) is None
+    if get_fast_policy_answer(user_text) is not None:
+        return False
+    # 사이즈 질문은 결정론적 처리 후에도 LLM이 보완할 수 있도록 허용
+    # (단, 추천 질문은 이미 reco_ans로 처리되므로 중복 LLM 호출 방지)
+    if is_recommendation_question(user_text):
+        return False  # 추천은 build_recommendation_answer에서 이미 처리
+    return True
 
 
 def safe_llm_fallback(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
@@ -1020,6 +1097,29 @@ def safe_llm_fallback(user_text: str, product_context: Dict, db_product: Optiona
     return "지금 잠깐 답변이 늦어지고 있어요. 같은 내용을 한 번만 다시 보내주시면 바로 이어서 도와드릴게요 :)"
 
 
+def _determine_response_mode(
+    followup_ans, reco_ans, name_ans, policy_ans, size_ans, color_ans, used_llm: bool, used_fallback: bool
+) -> tuple:
+    """어떤 로직으로 답변했는지 판단 → response_mode, fallback_reason 반환"""
+    if followup_ans:
+        return "rule_followup", ""
+    if reco_ans:
+        return "rule_reco", ""
+    if name_ans:
+        return "rule_name", ""
+    if policy_ans:
+        return "rule_policy", ""
+    if size_ans:
+        return "rule_size", ""
+    if color_ans:
+        return "rule_color", ""
+    if used_llm:
+        return "llm", ""
+    if used_fallback:
+        return "fallback", "llm_unavailable"
+    return "unknown", ""
+
+
 def process_user_message(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> None:
     user_hash = str(hash(clean_text(user_text)))
     now = time.time()
@@ -1028,29 +1128,86 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
     if user_hash == st.session_state.last_user_hash and now - st.session_state.last_user_ts < 4 and st.session_state.last_answer:
         st.session_state.messages.append({"role": "assistant", "content": st.session_state.last_answer})
         return
+
     st.session_state.last_user_hash = user_hash
     st.session_state.last_user_ts = now
     st.session_state.is_processing = True
     st.session_state.messages.append({"role": "user", "content": user_text})
+
     current_pno = normalize_product_no((db_product or {}).get("product_no", "") or product_context.get("product_no", ""))
-    log_chat("USER", user_text, current_pno)
+    current_pname = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", ""))
+    session_id = st.session_state.get("session_id", "")
+    t_start = time.time()
+
+    # USER 메시지 로그
+    write_log(
+        event_type="user_message",
+        product_no=current_pno,
+        product_name=current_pname,
+        user_text=user_text,
+        session_id=session_id,
+    )
+
     try:
-        direct_answers = [
-            build_followup_recommendation_answer(user_text),
-            build_name_answer(product_context, db_product) if is_name_question(user_text) else None,
-            get_fast_policy_answer(user_text),
-            build_size_answer(user_text, product_context, db_product),
-            build_recommendation_answer(user_text, product_context, db_product),
-            build_color_answer(product_context, db_product) if is_color_question(user_text) else None,
-        ]
+        # ★ 우선순위: 추천 질문은 반드시 사이즈 판단보다 먼저 처리
+        followup_ans = build_followup_recommendation_answer(user_text)
+        reco_ans = build_recommendation_answer(user_text, product_context, db_product) if is_recommendation_question(user_text) else None
+        name_ans = build_name_answer(product_context, db_product) if is_name_question(user_text) else None
+        policy_ans = get_fast_policy_answer(user_text)
+        size_ans = build_size_answer(user_text, product_context, db_product)
+        color_ans = build_color_answer(product_context, db_product) if is_color_question(user_text) else None
+
+        direct_answers = [followup_ans, reco_ans, name_ans, policy_ans, size_ans, color_ans]
         answer = next((a for a in direct_answers if a), None)
+
+        used_llm = False
+        used_fallback = False
+
         if not answer and llm_can_help(user_text):
             answer = call_llm(user_text, product_context, db_product)
+            used_llm = bool(answer)
+
         if not answer:
             answer = safe_llm_fallback(user_text, product_context, db_product)
+            used_fallback = True
+
+        latency_ms = (time.time() - t_start) * 1000
+        response_mode, fallback_reason = _determine_response_mode(
+            followup_ans, reco_ans, name_ans, policy_ans, size_ans, color_ans, used_llm, used_fallback
+        )
+        is_fallback = used_fallback or response_mode == "fallback"
+
         st.session_state.last_answer = answer
         st.session_state.messages.append({"role": "assistant", "content": answer})
-        log_chat("MIYA", answer, current_pno)
+
+        # MIYA 응답 로그 (user_text 페어링 포함)
+        write_log(
+            event_type="assistant_response",
+            product_no=current_pno,
+            product_name=current_pname,
+            user_text=user_text,
+            bot_text=answer,
+            response_mode=response_mode,
+            fallback_reason=fallback_reason,
+            is_fallback=is_fallback,
+            latency_ms=latency_ms,
+            session_id=session_id,
+        )
+
+    except Exception as e:
+        latency_ms = (time.time() - t_start) * 1000
+        write_log(
+            event_type="error",
+            product_no=current_pno,
+            product_name=current_pname,
+            user_text=user_text,
+            error_text=str(e)[:300],
+            latency_ms=latency_ms,
+            session_id=session_id,
+        )
+        err_answer = "잠깐 오류가 생겼어요. 같은 내용을 다시 보내주시면 바로 이어서 도와드릴게요 :)"
+        st.session_state.last_answer = err_answer
+        st.session_state.messages.append({"role": "assistant", "content": err_answer})
     finally:
         st.session_state.is_processing = False
 
