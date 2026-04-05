@@ -1856,7 +1856,8 @@ if not st.session_state.messages:
         welcome = (
             "안녕하세요? 옷 같이 봐드리는 미야언니예요 :)\n"
             "지금은 일반 상담 모드예요.\n"
-            "상품 상세페이지에서 채팅창을 열면 그 상품 기준으로 더 정확하게 상담해드릴 수 있어요 :)"
+            "상품 상세페이지에서 채팅창을 열면 그 상품 기준으로 더 정확하게 상담해드릴 수 있어요 :)\n\n"
+            "이 채팅창을 닫고, 궁금하신 상품 상세페이지에서 채팅창을 다시 열어 상담을 진행해주세요 ^^"
         )
     st.session_state.messages.append({"role": "assistant", "content": welcome})
 
