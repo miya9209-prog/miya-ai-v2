@@ -548,7 +548,52 @@ def is_name_question(user_text: str) -> bool:
 
 
 def is_color_question(user_text: str) -> bool:
+    """현재 상품의 컬러 옵션 질문"""
     return any(k in user_text for k in ["컬러", "색상", "무슨 색", "어떤 색"] + COLOR_CANDIDATES)
+
+
+def is_color_match_question(user_text: str) -> bool:
+    """컬러 조합/매치 질문 — 어떤 색이 어울리는지"""
+    q = user_text.replace(" ", "")
+    kws = [
+        "어울리는색", "어울리는컬러", "어울리는색깔",
+        "색깔매치", "컬러매치", "색매치", "색조합", "컬러조합",
+        "어떤컬러", "어떤색이", "어떤색으로", "무슨색",
+        "색상어울", "색어울", "컬러어울",
+        "같이입으면좋은색", "코디색",
+    ]
+    if any(k in q for k in kws): return True
+    # 컬러 언급 + 어울림 표현
+    has_color = any(c in user_text for c in COLOR_CANDIDATES + ["흰색", "검정", "검은색", "흰", "회색", "하늘색", "연두색", "갈색"])
+    has_match = any(k in q for k in ["어울", "매치", "조합", "같이", "함께", "코디"])
+    if has_color and has_match: return True
+    return False
+
+
+def is_body_style_question(user_text: str) -> bool:
+    """체형 보완 코디 질문 — 날씬해보이게, 키커보이게 등"""
+    q = user_text.replace(" ", "")
+    kws = [
+        "날씬해보이게", "날씬해보이는", "날씬하게보이", "날씬보이",
+        "키커보이게", "키커보이는", "키가커보이", "키작아보이지않",
+        "키가작아보이지않", "다리길어보이게", "다리길어보이는",
+        "균형있어보이게", "균형있게", "균형잡혀",
+        "뚱뚱해보이지않", "뚱뚱해보이지않게", "살빠져보이게", "살빠보이",
+        "슬림해보이게", "슬림하게", "슬림해보이는",
+        "작아보이지않", "통통해보이지않", "통통해보이지않게",
+        "보정코디", "체형보완", "체형커버",
+        "어때입어야", "어떻게입어야", "코디법", "입는법", "입는방법",
+    ]
+    if any(k in q for k in kws): return True
+    patterns = [
+        r"(날씬|슬림|키|다리|균형).{0,10}(보이게|보이는|보이도록|보이려면|보일)",
+        r"(작아|뚱뚱|통통|짧아).{0,10}보이지\s*않",
+        r"체형.{0,15}(보완|커버|살려|강조|숨기|맞게|맞는)",
+        r"(작고\s*통통|키작고|키작은).{0,15}(입는법|코디|추천|어떻게|뭐)",
+    ]
+    for pat in patterns:
+        if re.search(pat, user_text): return True
+    return False
 
 
 def is_recommendation_question(user_text: str) -> bool:
@@ -571,6 +616,10 @@ def is_recommendation_question(user_text: str) -> bool:
         "보여줘", "보여주세요", "뭐입", "뭘입", "무엇을입",
         "위아래", "상하의", "전체코디",
         "어떤거", "어떤게좋", "뭐가좋", "뭘살",
+        "비슷한스타일", "이런스타일로", "이런비슷한",
+        "입을수있는상품", "같은느낌으로", "이런류",
+        "비슷한티", "비슷한옷있", "비슷한거있", "비슷한상품있",
+        "이것보다", "이거보다", "더큰비슷한", "큰비슷한",
     ]
     if any(k in q for k in reco_kws): return True
 
@@ -618,6 +667,9 @@ def is_recommendation_question(user_text: str) -> bool:
         r"(맞는|어울리는|어울릴).{0,10}(자켓|아우터|옷|바지|상품|점퍼|맨투맨|셔츠).{0,10}(있|없|찾|줘)",
         r"(내|제)\s*(사이즈|몸).{0,10}(맞는|되는|가능한).{0,10}(있|없|찾)",
         r"(88|99|77반).{0,10}(되는|나오는|있는).{0,10}(자켓|아우터|옷|상품|점퍼|바지)",
+        r"비슷한\s*(티셔츠|맨투맨|셔츠|바지|자켓|원피스|가디건|니트|옷|상품|거).{0,10}(있|없|나와|찾)",
+        r"(이것|이거|이옷)보다.{0,15}(크|넉넉|여유|큰).{0,10}(비슷|같은|이런)",
+        r"(더\s*큰|더\s*넉넉한|더\s*여유).{0,15}(비슷한|같은|이런)",
     ]
     for pat in situation_patterns:
         if re.search(pat, user_text): return True
@@ -829,9 +881,23 @@ def infer_target_category_from_query(user_text: str, current_product: Dict) -> s
     # 코디 세트 요청 ("코디할 아이템", "전체 코디", "코디 추천") → 아우터 우선
     if any(k in q for k in ["코디할 아이템", "전체 코디", "세트 코디", "코디 세트", "코디 추천"]):
         return "코디세트"
-    # 현재 상품 기준으로 반대편 추천
+    # ★ "비슷한 스타일", "입을 수 있는 상품", "같은 종류" → 현재 상품과 동일 카테고리
+    same_cat_kws = ["비슷한스타일", "비슷한상품", "비슷한옷", "비슷한거", "비슷한티",
+                    "입을수있는상품", "같은종류", "같은카테고리", "이런스타일",
+                    "이런비슷한", "같은느낌", "이런류"]
     current_sub = clean_text(current_product.get("sub_category", ""))
     current_cat = clean_text(current_product.get("category", ""))
+    if any(k in q for k in same_cat_kws):
+        # 현재 상품 카테고리와 같은 카테고리 반환
+        sub_to_cat = {
+            "티셔츠": "티셔츠", "맨투맨": "맨투맨", "셔츠": "셔츠",
+            "블라우스": "블라우스", "니트": "니트", "가디건": "가디건",
+            "자켓": "자켓", "점퍼": "점퍼",
+            "슬랙스": "팬츠", "데님": "팬츠", "팬츠": "팬츠",
+            "스커트": "스커트", "원피스": "원피스",
+        }
+        return sub_to_cat.get(current_sub, "")
+    # 현재 상품 기준으로 반대편 추천 (어울리는 것)
     if current_sub in BOTTOM_SUB_CATS:
         return "블라우스"
     if current_cat in TOP_MAIN_CATS or current_sub in TOP_SUB_CATS:
@@ -1531,6 +1597,158 @@ def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
     return None
 
 
+# ── 컬러매치 기본 지식 ────────────────────────────────────────────────────────
+COLOR_MATCH_GUIDE = {
+    "화이트": ["블랙", "네이비", "베이지", "카키", "그레이", "데님 계열"],
+    "블랙": ["화이트", "그레이", "베이지", "레드", "핑크", "카키"],
+    "아이보리": ["블랙", "브라운", "카키", "베이지", "네이비", "버건디"],
+    "베이지": ["블랙", "화이트", "브라운", "카키", "네이비", "올리브"],
+    "그레이": ["블랙", "화이트", "네이비", "핑크", "버건디"],
+    "네이비": ["화이트", "아이보리", "베이지", "그레이"],
+    "카키": ["화이트", "아이보리", "베이지", "블랙", "브라운"],
+    "핑크": ["화이트", "그레이", "블랙", "네이비", "베이지"],
+    "브라운": ["베이지", "아이보리", "카키", "크림", "화이트"],
+}
+
+BODY_STYLE_GUIDE = {
+    "날씬": [
+        "상하의 동일 계열 컬러로 세로 라인을 만들면 날씬해 보여요",
+        "밝은 상의 + 어두운 하의 조합이 허리 라인을 잡아줘요",
+        "V넥이나 세로 스트라이프는 시선을 위아래로 분산시켜줘요",
+        "너무 헐렁하거나 타이트한 것보다 세미핏이 가장 날씬해 보여요",
+    ],
+    "키": [
+        "상하의 같은 계열 색상으로 세로 선을 만들어주세요",
+        "하이웨이스트 바지나 치마로 다리를 길어 보이게 해요",
+        "크롭 상의 + 하이웨이스트 하의 조합이 효과적이에요",
+        "세로 줄무늬, 긴 목걸이, 롱 가디건도 키가 커 보여요",
+    ],
+    "복부": [
+        "허리 위로 살짝 여유 있는 루즈핏이 배 라인을 자연스럽게 가려줘요",
+        "A라인 스커트나 와이드 팬츠로 시선을 아래로 분산시켜요",
+        "어두운 계열 컬러가 라인을 정돈해줘요",
+        "벨트나 허리 포인트 없는 디자인이 편안해 보여요",
+    ],
+    "하체": [
+        "상의에 포인트를 주고 하의는 어두운 컬러를 선택해요",
+        "와이드 팬츠나 A라인으로 허벅지 라인을 자연스럽게 덮어요",
+        "상의를 약간 볼륨 있게 해서 상하체 균형을 맞춰요",
+        "롱 가디건으로 힙 라인을 가려줄 수 있어요",
+    ],
+    "상체": [
+        "V넥이나 보트넥으로 어깨선을 부드럽게 해줘요",
+        "하의에 포인트 컬러를 두어 시선을 아래로 유도해요",
+        "세미핏이 상체를 자연스럽게 정돈해줘요",
+        "어깨 패드나 퍼프소매, 가로 줄무늬 상의는 피하는 게 좋아요",
+    ],
+}
+
+
+def build_color_match_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
+    """컬러 조합/매치 질문 처리"""
+    if not is_color_match_question(user_text):
+        return None
+
+    current_colors = parse_color_options(product_context, db_product)
+    current_name = clean_text(
+        (db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품"
+    )
+    current_sub = clean_text((db_product or {}).get("sub_category", "") or product_context.get("sub_category", ""))
+
+    # 현재 상품 컬러 기반 매치 안내
+    if current_colors:
+        base_color = current_colors[0]
+        matches = COLOR_MATCH_GUIDE.get(base_color, [])
+        if matches:
+            match_str = ", ".join(matches[:4])
+            pairing = "상의" if current_sub in BOTTOM_SUB_CATS else "하의나 아우터"
+            return (
+                "{} {} 컬러 기준으로 {}에 잘 어울리는 색상은 {}예요 :)\n"
+                "톤온톤(비슷한 계열)으로 맞추거나, 포인트 컬러를 주는 방법 모두 잘 어울려요.\n"
+                "신발과 가방도 같은 컬러 계열로 맞추면 전체적으로 세련되게 보여요.".format(
+                    current_name, base_color, pairing, match_str)
+            )
+
+    # 질문에서 색상 직접 언급 시
+    color_words = {
+        "흰색": "화이트", "흰": "화이트", "검정": "블랙", "검은색": "블랙",
+        "회색": "그레이", "하늘색": "소라", "갈색": "브라운",
+    }
+    for word, mapped in color_words.items():
+        if word in user_text:
+            matches = COLOR_MATCH_GUIDE.get(mapped, COLOR_MATCH_GUIDE.get("화이트", []))
+            return (
+                "{} 계열에 잘 어울리는 색상은 {} 등이에요 :)\n"
+                "같은 톤으로 통일하거나, 포인트 컬러 한 가지를 더하면 세련되게 완성돼요.\n"
+                "신발이나 가방은 블랙이나 베이지로 맞추면 무난하게 코디돼요.".format(
+                    word, ", ".join(matches[:4]))
+            )
+
+    for color in COLOR_CANDIDATES:
+        if color in user_text:
+            matches = COLOR_MATCH_GUIDE.get(color, [])
+            if matches:
+                return (
+                    "{} 컬러에 잘 어울리는 색상은 {}예요 :)\n"
+                    "톤온톤 매치나 블랙·화이트 같은 베이직 컬러를 베이스로 맞추면 실패 없어요.".format(
+                        color, ", ".join(matches[:4]))
+                )
+
+    return (
+        "컬러 매치는 블랙·화이트·베이지 같은 베이직을 베이스로 맞추면 실패 없어요 :)\n"
+        "포인트 컬러 한 가지만 더하면 세련돼 보여요. 구체적인 색상이 있으면 말씀해주세요!"
+    )
+
+
+def build_body_style_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
+    """체형 보완 코디 질문 처리"""
+    if not is_body_style_question(user_text):
+        return None
+
+    q = user_text.replace(" ", "")
+    body_hints = extract_user_body_from_text(user_text)
+    current_name = clean_text(
+        (db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품"
+    )
+
+    if any(k in q for k in ["날씬", "슬림", "살빠져보이", "뚱뚱해보이지않", "통통해보이지않"]):
+        tips = BODY_STYLE_GUIDE["날씬"][:3]
+        intro = "날씬해 보이는 코디"
+    elif any(k in q for k in ["키커보이", "다리길어보이", "작아보이지않", "키작", "키가작"]):
+        tips = BODY_STYLE_GUIDE["키"][:4]
+        intro = "키가 커 보이는 코디"
+    elif any(k in q for k in ["복부", "배", "뱃살"]) or body_hints.get("belly_hint"):
+        tips = BODY_STYLE_GUIDE["복부"][:3]
+        intro = "배 라인 보완 코디"
+    elif any(k in q for k in ["하체", "허벅지", "엉덩이"]) or body_hints.get("lower_body_hint"):
+        tips = BODY_STYLE_GUIDE["하체"][:3]
+        intro = "하체 보완 코디"
+    elif any(k in q for k in ["상체", "어깨", "팔뚝"]) or body_hints.get("upper_body_hint") == "상체큰편":
+        tips = BODY_STYLE_GUIDE["상체"][:3]
+        intro = "상체 보완 코디"
+    elif any(k in q for k in ["균형", "작고통통", "키작고통통"]) or (
+        body_hints.get("height_hint") == "단신" and body_hints.get("lower_body_hint")
+    ):
+        tips = BODY_STYLE_GUIDE["키"][:2] + BODY_STYLE_GUIDE["날씬"][:2]
+        intro = "균형 있어 보이는 코디"
+    else:
+        tips = [
+            "상하의 컬러를 같은 계열로 맞추면 세로 라인이 생겨 전체적으로 정돈돼 보여요",
+            "본인이 불편하게 느끼는 부분은 어두운 색이나 루즈핏으로 자연스럽게 가려주세요",
+            "예쁘다고 느끼는 부분은 포인트 컬러나 핏으로 강조하면 좋아요",
+        ]
+        intro = "체형을 살리는 코디"
+
+    lines = ["{} 팁이에요 :)\n".format(intro)]
+    for i, tip in enumerate(tips, 1):
+        lines.append("{}. {}".format(i, tip))
+    if current_name and current_name != "지금 보시는 상품":
+        lines.append("\n지금 보시는 {} 기준으로 구체적인 코디가 궁금하시면 말씀해주세요 :)".format(current_name))
+
+    return "\n".join(lines)
+
+
+
 def trim_text(text: str, max_len: int = 500) -> str:
     t = clean_text(text)
     return t if len(t) <= max_len else t[:max_len] + "…"
@@ -1567,6 +1785,8 @@ def slim_context_for_llm(product_context: Dict, db_product: Optional[Dict], user
         "page_summary": trim_text(product_context.get("summary", ""), 300),
         "allowed_candidates": [],
         "policy_db": POLICY_DB,
+        "color_match_note": "컬러매치는 결정론적 로직이 처리. 없는 색상 절대 언급 금지",
+        "body_style_note": "체형코디는 결정론적 로직이 처리. 구체적 상품명은 allowed_candidates만 사용",
     }
 
 
@@ -1599,15 +1819,17 @@ def call_llm(user_text: str, product_context: Dict, db_product: Optional[Dict]) 
 
 
 def llm_can_help(user_text: str) -> bool:
-    # 사이즈/이름/컬러/정책은 결정론적 로직이 처리하므로 LLM 불필요
+    """LLM 호출 필요 여부 — 결정론적 로직이 처리하는 건 LLM 불필요"""
     if is_name_question(user_text) or is_color_question(user_text):
         return False
     if get_fast_policy_answer(user_text) is not None:
         return False
-    # 사이즈 질문은 결정론적 처리 후에도 LLM이 보완할 수 있도록 허용
-    # (단, 추천 질문은 이미 reco_ans로 처리되므로 중복 LLM 호출 방지)
     if is_recommendation_question(user_text):
-        return False  # 추천은 build_recommendation_answer에서 이미 처리
+        return False
+    if is_color_match_question(user_text):
+        return False  # build_color_match_answer에서 처리
+    if is_body_style_question(user_text):
+        return False  # build_body_style_answer에서 처리
     return True
 
 
@@ -1683,9 +1905,11 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
         name_ans = build_name_answer(product_context, db_product) if is_name_question(user_text) else None
         policy_ans = get_fast_policy_answer(user_text)
         size_ans = build_size_answer(user_text, product_context, db_product)
+        color_match_ans = build_color_match_answer(user_text, product_context, db_product)
+        body_style_ans = build_body_style_answer(user_text, product_context, db_product)
         color_ans = build_color_answer(product_context, db_product) if is_color_question(user_text) else None
 
-        direct_answers = [followup_ans, reco_ans, name_ans, policy_ans, size_ans, color_ans]
+        direct_answers = [followup_ans, reco_ans, name_ans, policy_ans, size_ans, color_match_ans, body_style_ans, color_ans]
         answer = next((a for a in direct_answers if a), None)
 
         used_llm = False
