@@ -1188,6 +1188,76 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
     return "\n".join(lines)
 
 
+def _followup_size_answer(idx: int, name: str, user_size: str, reco_context: Dict, reco_db: Optional[Dict]) -> str:
+    """추천 번호 선택 시 DB 기준 정직한 사이즈 안내 — 핵심 함수"""
+    size_cat = get_product_size_category(reco_db, reco_context)
+    size_label = "하의" if size_cat == "bottom" else "상의"
+
+    # 사용할 사이즈 결정
+    body = build_body_context()
+    if size_cat == "bottom":
+        user_size = user_size or clean_text(body.get("bottom_size", "")) or detect_size_from_text("") or ""
+    else:
+        user_size = user_size or clean_text(body.get("top_size", "")) or ""
+
+    if not user_size:
+        return "{}번으로 추천드린 {} 기준으로 사이즈 보려면 고객님 {} 사이즈를 먼저 알려주세요 :)".format(
+            idx, name, size_label)
+
+    size_eval = evaluate_size_support(user_size, reco_context, reco_db)
+    max_size = size_eval.get("max_size", "")
+    user_r = size_rank(user_size)
+    max_r = SIZE_ORDER.get(max_size, 0) if max_size else 0
+
+    # ── 완전 불가: 범위 2 이상 초과
+    if size_eval["supported"] is False and not (user_r and max_r and user_r == max_r + 1):
+        return (
+            "{}번으로 추천드린 {}은 고객님 {} {} 기준으로는 사이즈가 없어요.\n"
+            "이 상품은 최대 {}까지 나와요.\n"
+            "다른 상품을 찾아드릴까요?".format(
+                idx, name, size_label, user_size, max_size or "확인 필요")
+        )
+
+    # ── 경계+1: 77반 → 77까지 상품 (가장 중요한 케이스)
+    if size_eval["supported"] is False and user_r and max_r and user_r == max_r + 1:
+        return (
+            "{}번으로 추천드린 {}은 최대 {}까지 나오는 상품이에요.\n"
+            "고객님 {} {}이 딱 경계 바로 위라 사이즈상으로는 안 맞아요.\n"
+            "다만 실측표를 꼭 확인해보시면 의외로 가능한 경우도 있어요 — 상세페이지 실측표를 같이 봐주세요 :)".format(
+                idx, name, max_size, size_label, user_size)
+        )
+
+    # ── 경계 (상단 사이즈)
+    if size_eval["supported"] == "edge":
+        reason = clean_text(size_eval.get("reason", ""))
+        return (
+            "{}번으로 추천드린 {}은 고객님 {} {} 기준이면 딱 경계 사이즈예요.\n"
+            "{}\n"
+            "편하게 입는 걸 좋아하시면 실측표를 꼭 같이 보시는 게 안전해요 :)".format(
+                idx, name, size_label, user_size,
+                reason or "상단 사이즈라 체감이 약간 타이트할 수 있어요.")
+        )
+
+    # ── 완전 포함
+    if size_eval["supported"] is True:
+        reason = clean_text(size_eval.get("reason", ""))
+        return (
+            "{}번으로 추천드린 {}은 고객님 {} {} 기준으로 사이즈 범위 안에 들어와요 :)\n"
+            "{}\n"
+            "부담 없이 입는 쪽으로 비교적 안정적인 편이에요.".format(
+                idx, name, size_label, user_size,
+                reason or "사이즈 범위 안쪽으로 확인돼요.")
+        )
+
+    # ── 정보 부족
+    db_range = clean_text((reco_db or {}).get("size_range", ""))
+    return (
+        "{}번으로 추천드린 {}은 현재 {} 쪽이에요.\n"
+        "정확한 핏은 상세페이지 실측표를 같이 보시는 쪽이 제일 안전해요 :)".format(
+            idx, name, db_range or "사이즈 정보 확인 필요")
+    )
+
+
 def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
     reco = get_followup_recommendation(user_text)
     if not reco:
@@ -1196,38 +1266,35 @@ def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
     idx = (get_recommendation_reference_index(user_text) or 0) + 1
     name = reco_context["product_name"]
 
+    # ── 상품 설명 요청
     if is_name_question(user_text) or any(k in user_text for k in ["어떤 옷", "어떤 바지", "설명", "알려줘", "뭐야"]):
         reasons = [clean_text(x) for x in (reco.get("reasons") or []) if clean_text(x)]
         reason_line = " ".join(reasons[:2]) if reasons else "고객님 스타일에 맞게 골라드린 상품이에요."
-        return "{}번으로 추천드린 상품은 {}이에요 :)\n{}\n사이즈나 코디가 궁금하시면 말씀해주세요.".format(idx, name, reason_line)
+        return "{}번으로 추천드린 상품은 {}이에요 :)\n{}\n사이즈나 코디가 궁금하시면 말씀해주세요.".format(
+            idx, name, reason_line)
 
-    if is_size_question(user_text):
-        body = build_body_context()
-        size_cat = get_product_size_category(reco_db, reco_context)
-        user_size = (clean_text(body.get("bottom_size", "")) if size_cat == "bottom"
-                     else clean_text(body.get("top_size", ""))) or detect_size_from_text(user_text) or ""
-        if not user_size:
-            size_label = "하의" if size_cat == "bottom" else "상의"
-            return "{}번으로 추천드린 {} 기준으로 사이즈 보려면 고객님 {} 사이즈를 먼저 알려주세요 :)".format(idx, name, size_label)
-        size_eval = evaluate_size_support(user_size, reco_context, reco_db)
-        reason = clean_text(size_eval.get("reason", ""))
-        max_size = size_eval.get("max_size", "")
-        if size_eval["supported"] is False:
-            return "{}번으로 추천드린 {}은 고객님 {} 기준으로는 맞는 사이즈가 없어요.\n{}\n다른 상품으로 다시 찾아드릴까요?".format(
-                idx, name, user_size, reason or "최대 {}까지 나오는 상품이에요.".format(max_size))
-        if size_eval["supported"] == "edge":
-            return "{}번으로 추천드린 {}은 고객님 {} 기준이면 가능은 하지만 딱 경계 사이즈예요.\n{}\n편하게 입는 걸 좋아하시면 실측표를 같이 보시는 게 안전해요.".format(
-                idx, name, user_size, reason or "상단 사이즈에 가까워서 체감이 약간 타이트할 수 있어요.")
-        if size_eval["supported"] is True:
-            return "{}번으로 추천드린 {}은 고객님 {} 기준으로 사이즈 범위 안에 들어와요 :)\n{}\n부담 없이 입는 쪽으로 비교적 안정적인 편이에요.".format(
-                idx, name, user_size, reason)
-        db_range = clean_text((reco_db or {}).get("size_range", ""))
-        return "{}번으로 추천드린 {}은 현재 {}쪽이에요 :)\n정확한 핏은 실측표를 같이 보시는 쪽이 제일 안전해요.".format(
-            idx, name, db_range or "사이즈 정보 확인 필요")
-
+    # ── 컬러 질문
     if is_color_question(user_text):
         ans = build_color_answer(reco_context, reco_db)
-        return "{}번으로 추천드린 {} 기준으로 보면, {}".format(idx, name, ans) if ans else "{}번으로 추천드린 {}은 현재 컬러 정보가 정확히 확인되지 않아요.".format(idx, name)
+        return "{}번으로 추천드린 {} 기준으로 보면, {}".format(idx, name, ans) if ans else \
+               "{}번으로 추천드린 {}은 현재 컬러 정보가 정확히 확인되지 않아요.".format(idx, name)
+
+    # ★ 핵심: 번호 선택(1번/2번/3번)이거나 사이즈 질문이면 무조건 DB 기준 사이즈 안내
+    # "2번" 단독 입력도 여기서 처리 — LLM으로 절대 넘기지 않음
+    ref_idx = get_recommendation_reference_index(user_text)
+    is_number_select = ref_idx is not None and clean_text(user_text).replace(" ","") in [
+        "1번","2번","3번","첫번째","두번째","세번째","첫째","둘째","셋째","그거","그상품","그옷"
+    ]
+
+    if is_number_select or is_size_question(user_text):
+        body = build_body_context()
+        size_cat = get_product_size_category(reco_db, reco_context)
+        user_size = (
+            clean_text(body.get("bottom_size", "")) if size_cat == "bottom"
+            else clean_text(body.get("top_size", ""))
+        ) or detect_size_from_text(user_text) or ""
+        return _followup_size_answer(idx, name, user_size, reco_context, reco_db)
+
     return None
 
 
