@@ -490,6 +490,10 @@ def is_size_question(user_text: str) -> bool:
     """4050 여성 고객의 다양한 사이즈/핏 질문 감지"""
     if is_recommendation_question(user_text):
         return False
+    # 추천 후속 질문 ("추천해준 게 맞아?") → followup에서 처리
+    q_tmp = user_text.replace(" ","")
+    if any(k in q_tmp for k in ["추천해준","방금추천","추천한거","추천한게"]):
+        return False
     q = user_text.replace(" ", "")
 
     # ── 직접 사이즈 키워드
@@ -502,11 +506,12 @@ def is_size_question(user_text: str) -> bool:
         "내사이즈", "나한테맞", "나에게맞", "제사이즈",
         "입을수있", "살수있", "나올까", "나오나요", "나오는지",
         "안맞겠지", "안맞을까", "안맞나요", "안맞아",
-        "될까", "될까요", "되나요", "돼요", "돼",
+        "될까", "될까요", "돼요",
         "가능해요", "가능한가요", "가능할까", "가능한지",
         "살수있어", "살수있나요",
         "입어도될", "입어도돼", "입어도되나",
         "사이즈있어", "사이즈있나", "사이즈나와",
+        "티안날까", "티가날까", "티날까",
         "어떤사이즈", "몇사이즈",
         # 4050 특유 표현
         "괜찮을까요", "괜찮을까", "괜찮겠어요", "괜찮나요",
@@ -598,15 +603,18 @@ def is_body_style_question(user_text: str) -> bool:
 
 def is_recommendation_question(user_text: str) -> bool:
     """4050 여성 고객의 다양한 추천/코디 요청 감지"""
+    # 컬러매치/체형코디 질문은 추천이 아닌 별도 로직으로 처리
+    if is_color_match_question(user_text): return False
+    if is_body_style_question(user_text): return False
     q = user_text.replace(" ", "")
 
     # ── 명시적 추천/코디 키워드
     reco_kws = [
-        "추천", "추천해", "추천해줘", "추천해주세요", "추천좀", "추천부탁",
+        "추천해줘", "추천해주세요", "추천좀", "추천부탁", "추천해봐", "추천좀해줘",
         "골라줘", "골라줘요", "골라주세요", "골라봐줘", "골라봐",
         "어울리는", "어울릴", "어울려", "어울리게",
         "같이입", "같이입을", "함께입", "세트로",
-        "코디", "코디해줘", "코디도와줘", "코디부탁",
+        "코디해줘", "코디도와줘", "코디부탁", "코디추천", "코디도움",
         "매치", "매치해줘", "매치되는",
         "비슷한옷", "비슷한상품", "비슷한거", "비슷한느낌",
         "다른옷", "다른상품", "다른거", "다른걸로",
@@ -1948,15 +1956,19 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
     try:
         # ★ 우선순위: 추천 질문은 반드시 사이즈 판단보다 먼저 처리
         followup_ans = build_followup_recommendation_answer(user_text)
-        reco_ans = build_recommendation_answer(user_text, product_context, db_product) if is_recommendation_question(user_text) else None
+        # ★ 컬러매치/체형코디는 추천보다 먼저 처리 (코디 관련 키워드 충돌 방지)
+        color_match_ans = build_color_match_answer(user_text, product_context, db_product)
+        body_style_ans = build_body_style_answer(user_text, product_context, db_product)
+        # 컬러매치/체형코디가 아닌 경우에만 추천 처리
+        reco_ans = build_recommendation_answer(user_text, product_context, db_product) if (
+            is_recommendation_question(user_text) and not color_match_ans and not body_style_ans
+        ) else None
         name_ans = build_name_answer(product_context, db_product) if is_name_question(user_text) else None
         policy_ans = get_fast_policy_answer(user_text)
         size_ans = build_size_answer(user_text, product_context, db_product)
-        color_match_ans = build_color_match_answer(user_text, product_context, db_product)
-        body_style_ans = build_body_style_answer(user_text, product_context, db_product)
         color_ans = build_color_answer(product_context, db_product) if is_color_question(user_text) else None
 
-        direct_answers = [followup_ans, reco_ans, name_ans, policy_ans, size_ans, color_match_ans, body_style_ans, color_ans]
+        direct_answers = [followup_ans, color_match_ans, body_style_ans, reco_ans, name_ans, policy_ans, size_ans, color_ans]
         answer = next((a for a in direct_answers if a), None)
 
         used_llm = False
