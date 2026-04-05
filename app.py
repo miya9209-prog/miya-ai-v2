@@ -964,22 +964,42 @@ def build_product_reason(rowd: Dict, user_text: str, body_hints: Dict) -> List[s
     elif body_hints.get("upper_body_hint") == "상체큰편" and any(k in cover for k in ["어깨", "상체", "가슴"]):
         reasons.append("상체 라인을 자연스럽게 잡아줘요")
 
-    # ── 상품 유형별 기본 이유 (이유 없을 때)
+    # ── 상품 유형별 기본 이유 (이유 없을 때) — sub_category 기반
     if not reasons:
-        if "슬랙스" in name:
+        sub = clean_text(rowd.get("sub_category", ""))
+        fit = clean_text(rowd.get("fit_type", ""))
+        if sub == "슬랙스" or "슬랙스" in name:
             reasons.append("라인이 정돈되어 상의를 깔끔하게 살려줘요")
-        elif any(k in name for k in ["데님", "청바지"]):
+        elif sub == "데님" or any(k in name for k in ["데님", "청바지"]):
             reasons.append("편하면서도 세련되게 매치하기 좋아요")
-        elif any(k in name for k in ["자켓", "재킷"]):
+        elif sub in ["자켓"] or any(k in name for k in ["자켓", "재킷"]):
             reasons.append("전체 실루엣을 단정하게 잡아주는 편이에요")
-        elif any(k in name for k in ["블라우스"]):
+        elif sub == "점퍼" or any(k in name for k in ["점퍼", "야상"]):
+            reasons.append("가볍게 걸치기 좋고 활동적인 느낌이에요")
+        elif sub == "블라우스" or "블라우스" in name:
             reasons.append("여성스럽고 단정한 분위기를 줘요")
-        elif any(k in name for k in ["가디건"]):
+        elif sub == "가디건" or "가디건" in name:
             reasons.append("레이어드하기 좋고 부드러운 느낌이에요")
-        elif any(k in name for k in ["니트"]):
+        elif sub == "니트" or "니트" in name:
             reasons.append("따뜻하고 부드러운 소재로 편하게 입기 좋아요")
+        elif sub == "셔츠" or any(k in name for k in ["셔츠"]):
+            reasons.append("단정하면서도 활용도 높은 스타일이에요")
+        elif sub == "티셔츠" or any(k in name for k in ["티셔츠", "반팔", "5부"]):
+            reasons.append("깔끔하고 편하게 데일리로 입기 좋아요")
+        elif sub in ["팬츠"] or any(k in name for k in ["팬츠", "바지"]):
+            reasons.append("편하면서도 세련된 라인을 만들어줘요")
+        elif sub == "스커트" or any(k in name for k in ["스커트", "치마"]):
+            reasons.append("여성스럽게 코디하기 좋아요")
+        elif sub == "원피스" or "원피스" in name:
+            reasons.append("원피스 하나로 완성되는 간편한 코디예요")
         else:
-            reasons.append("지금 보시는 상품이랑 코디가 자연스럽게 이어져요")
+            style_tags = clean_text(rowd.get("style_tags", ""))
+            if "클래식" in style_tags or "단정" in style_tags:
+                reasons.append("단정하고 세련된 분위기를 줘요")
+            elif "캐주얼" in style_tags or "데일리" in style_tags:
+                reasons.append("편하게 일상에서 입기 좋아요")
+            else:
+                reasons.append("깔끔하게 코디하기 좋은 스타일이에요")
 
     seen, out = set(), []
     for r in reasons:
@@ -1484,7 +1504,18 @@ def _followup_size_answer(idx: int, name: str, user_size: str, reco_context: Dic
     user_r = size_rank(user_size)
     max_r = SIZE_ORDER.get(max_size, 0) if max_size else 0
 
-    # ── 완전 불가: 범위 2 이상 초과
+    # ── 경계 (상단 사이즈): 딱 최대 사이즈인 경우 — False 체크보다 반드시 먼저!
+    if size_eval["supported"] == "edge":
+        reason = clean_text(size_eval.get("reason", ""))
+        return (
+            "{}번으로 추천드린 {}은 고객님 {} {} 기준으로 딱 상단 사이즈예요.\n"
+            "{}\n"
+            "실측표를 꼭 같이 보시는 게 안전해요 :)".format(
+                idx, name, size_label, user_size,
+                reason or "최대 사이즈라 체감이 약간 타이트할 수 있어요.")
+        )
+
+    # ── 완전 불가 (범위 초과)
     if size_eval["supported"] is False and not (user_r and max_r and user_r == max_r + 1):
         return (
             "{}번으로 추천드린 {}은 고객님 {} {} 기준으로는 사이즈가 없어요.\n"
@@ -1493,24 +1524,13 @@ def _followup_size_answer(idx: int, name: str, user_size: str, reco_context: Dic
                 idx, name, size_label, user_size, max_size or "확인 필요")
         )
 
-    # ── 경계+1: 77반 → 77까지 상품 (가장 중요한 케이스)
+    # ── 경계+1 (77반 → 77까지 상품)
     if size_eval["supported"] is False and user_r and max_r and user_r == max_r + 1:
         return (
             "{}번으로 추천드린 {}은 최대 {}까지 나오는 상품이에요.\n"
             "고객님 {} {}이 딱 경계 바로 위라 사이즈상으로는 안 맞아요.\n"
-            "다만 실측표를 꼭 확인해보시면 의외로 가능한 경우도 있어요 — 상세페이지 실측표를 같이 봐주세요 :)".format(
+            "실측표를 꼭 확인해보시면 의외로 가능한 경우도 있어요 :)".format(
                 idx, name, max_size, size_label, user_size)
-        )
-
-    # ── 경계 (상단 사이즈)
-    if size_eval["supported"] == "edge":
-        reason = clean_text(size_eval.get("reason", ""))
-        return (
-            "{}번으로 추천드린 {}은 고객님 {} {} 기준이면 딱 경계 사이즈예요.\n"
-            "{}\n"
-            "편하게 입는 걸 좋아하시면 실측표를 꼭 같이 보시는 게 안전해요 :)".format(
-                idx, name, size_label, user_size,
-                reason or "상단 사이즈라 체감이 약간 타이트할 수 있어요.")
         )
 
     # ── 완전 포함
@@ -1554,12 +1574,40 @@ def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
         return "{}번으로 추천드린 {} 기준으로 보면, {}".format(idx, name, ans) if ans else \
                "{}번으로 추천드린 {}은 현재 컬러 정보가 정확히 확인되지 않아요.".format(idx, name)
 
-    # ★ 핵심: 추천 번호/추천 상품 참조 + 사이즈 질문 → 무조건 DB 기준 사이즈 안내
-    # "2번", "추천해준 게 맞아?", "77반인데 맞아?" 등 모두 여기서 처리 — LLM으로 절대 안 넘김
+    # ★ 핵심 분기: 번호 + 추천 요청 → 해당 상품을 기준으로 추천
+    # "3번 티랑 바지 추천해줘" → 3번 상품을 current_product로 삼아 추천
     ref_idx = get_recommendation_reference_index(user_text)
-
-    # 사이즈 의도 감지
     q_raw = user_text.replace(" ", "")
+
+    if is_recommendation_question(user_text):
+        # 번호 상품을 기준 상품으로 해서 추천
+        fake_product = current_product_dict(reco_context, reco_db)
+        body_ctx = build_body_context()
+        target_cat = infer_target_category_from_query(user_text, fake_product)
+        recos = recommend_products_for_query(user_text, fake_product, body_ctx, target_cat, limit=3)
+        if recos:
+            save_recommendations(recos)
+            situations = detect_situation_from_text(user_text)
+            if situations:
+                opener = "{}번 {} 기준으로 {} 자리에 어울릴 만한 쪽으로 골라드릴게요 :)".format(idx, name, situations[0])
+            elif target_cat == "팬츠":
+                opener = "{}번 {}이랑 잘 어울리는 바지 쪽으로 먼저 골라드릴게요.".format(idx, name)
+            elif target_cat in ["자켓","아우터","점퍼"]:
+                opener = "{}번 {}에 잘 어울리는 아우터로 먼저 골라드릴게요.".format(idx, name)
+            else:
+                opener = "{}번 {} 기준으로 어울리는 상품을 골라드릴게요.".format(idx, name)
+            lines = [opener]
+            for i2, r in enumerate(recos, 1):
+                reason_text = " ".join((r.get("reasons") or [])[:2]).strip()
+                size_info = " ({})".format(r["size_range"]) if r.get("size_range") else ""
+                lines.append("{}. {}{} — {}".format(i2, r["product_name"], size_info, reason_text) if reason_text
+                             else "{}. {}{}".format(i2, r["product_name"], size_info))
+            lines.append("마음 가는 번호 말씀해주시면 사이즈감도 바로 봐드릴게요 :)")
+            return "\n".join(lines)
+        # 추천 결과 없으면 fallback
+        return "{}번 {} 기준으로 조건에 맞는 상품을 찾기 어렵네요. 카테고리를 조금 다르게 말씀해주시면 다시 찾아볼게요 :)".format(idx, name)
+
+    # ── 사이즈 의도 감지
     size_intent_kws = [
         "맞아", "맞아요", "맞나", "맞나요", "맞을까", "맞을까요",
         "될까", "될까요", "되나요", "가능해요", "가능한가요",
@@ -1578,19 +1626,18 @@ def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
         else clean_text(body.get("top_size", ""))
     ) or detect_size_from_text(user_text) or ""
 
-    # "추천해준 게 다 맞아?" → 번호 없이 전체 목록 사이즈 요약
+    # "추천해준 게 다 맞아?" → 전체 목록 사이즈 요약
     is_all_check = (
-        ref_idx is not None and
-        has_size_intent and
-        clean_text(user_text).replace(" ","") not in ["1번","2번","3번","첫번째","두번째","세번째","첫째","둘째","셋째"]
-        and any(k in q_raw for k in ["추천해준","방금추천","추천한거","추천한게","다맞아","전부맞","모두맞","다가능","전부가능"])
+        ref_idx is not None and has_size_intent and
+        clean_text(user_text).replace(" ","") not in ["1번","2번","3번","첫번째","두번째","세번째","첫째","둘째","셋째"] and
+        any(k in q_raw for k in ["추천해준","방금추천","추천한거","추천한게","다맞아","전부맞","모두맞","다가능","전부가능"])
     )
     if is_all_check and user_size:
         summary = _all_recos_size_summary(user_size)
         if summary:
             return summary
 
-    # 번호 선택이거나, 추천 참조 + 사이즈 의도가 있으면 개별 사이즈 확인
+    # 번호 선택이거나 사이즈 의도 → 개별 사이즈 확인
     if ref_idx is not None or has_size_intent:
         return _followup_size_answer(idx, name, user_size, reco_context, reco_db)
 
