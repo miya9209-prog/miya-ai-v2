@@ -337,22 +337,45 @@ def build_body_context_text(body_ctx: Dict[str, str]) -> str:
 
 
 def extract_user_body_from_text(user_text: str) -> Dict[str, str]:
+    """자연어에서 체형 힌트 추출 — 다양한 말투 대응"""
     result = {}
     q = clean_text(user_text)
-    if any(k in q for k in ["키가 작", "키작", "소키", "키 작은", "키작은"]):
+
+    # ── 키
+    if any(k in q for k in ["키가 작", "키작", "소키", "키 작은", "키작은", "키가 많이", "단신", "작은키", "키가안커"]):
         result["height_hint"] = "단신"
-    elif any(k in q for k in ["키가 크", "키크", "키 큰", "키큰"]):
+    elif any(k in q for k in ["키가 크", "키크", "키 큰", "키큰", "장신", "큰키"]):
         result["height_hint"] = "장신"
-    # "가슴이 좀 있", "가슴이 있는", "가슴이 크" 등 다양한 표현 포함
-    if any(k in q for k in ["상체가 크", "상체크", "상체 있는", "상체있는", "어깨넓", "가슴크",
-                              "가슴이 좀", "가슴이좀", "가슴이 있", "가슴이있", "가슴이 크"]):
+
+    # ── 상체/가슴 (다양한 표현)
+    upper_big_kws = [
+        "상체가 크", "상체크", "상체 있는", "상체있는", "상체가 있",
+        "어깨넓", "어깨가 넓", "어깨가넓",
+        "가슴크", "가슴이 좀", "가슴이좀", "가슴이 있", "가슴이있", "가슴이 크",
+        "가슴이 커", "가슴이커", "가슴 있는", "가슴있는",
+        "상체비만", "상체가 발달", "상체발달",
+        "어깨가 커", "어깨가커",
+    ]
+    upper_small_kws = ["상체가 작", "상체작", "어깨좁", "어깨가 좁", "어깨가좁", "상체가 좁"]
+    if any(k in q for k in upper_big_kws):
         result["upper_body_hint"] = "상체큰편"
-    elif any(k in q for k in ["상체가 작", "상체작", "어깨좁"]):
+    elif any(k in q for k in upper_small_kws):
         result["upper_body_hint"] = "상체작은편"
-    if any(k in q for k in ["하체가 크", "하체크", "허벅지", "하체통통"]):
+
+    # ── 하체
+    lower_big_kws = [
+        "하체가 크", "하체크", "허벅지", "하체통통", "하체가 통통",
+        "허벅지가", "엉덩이가 크", "엉덩이가크", "골반이 넓", "골반넓",
+        "하체가 있", "하체있는", "하체비만", "다리가 굵",
+    ]
+    if any(k in q for k in lower_big_kws):
         result["lower_body_hint"] = "하체통통"
-    if any(k in q for k in ["배가 나", "복부", "뱃살"]):
+
+    # ── 복부
+    belly_kws = ["배가 나", "복부", "뱃살", "배가나", "배살", "배가 있", "배가있", "배나온", "배가 좀"]
+    if any(k in q for k in belly_kws):
         result["belly_hint"] = "복부커버필요"
+
     return result
 
 
@@ -364,30 +387,75 @@ def detect_size_from_text(user_text: str) -> Optional[str]:
 
 
 def detect_situation_from_text(user_text: str) -> List[str]:
-    return [kw for kw in SITUATION_KEYWORDS if kw in user_text]
+    """다양한 말투의 상황 키워드 감지"""
+    found = []
+    # 기본 키워드 매칭
+    for kw in SITUATION_KEYWORDS:
+        if kw in user_text:
+            found.append(kw)
+    # 추가 패턴
+    extra_map = {
+        "학교": ["선생님 만나", "학부모", "입학식", "졸업식", "학교 행사", "학교에"],
+        "출근": ["직장", "회사", "사무실", "오피스", "업무", "미팅", "비즈니스"],
+        "모임": ["하객", "결혼식", "돌잔치", "동창회", "동문회", "동기", "선후배", "격식"],
+        "여행": ["여행", "나들이", "나들이", "캠핑", "피크닉"],
+        "데이트": ["남자친구", "남편", "소개팅", "썸"],
+        "친구": ["친구들", "친구만나", "친구랑"],
+    }
+    for situation, patterns in extra_map.items():
+        if situation not in found:
+            if any(p in user_text for p in patterns):
+                found.append(situation)
+    return found
 
 
 def is_size_question(user_text: str) -> bool:
-    # 추천 요청이 포함된 문장은 사이즈 질문으로 분류하지 않음 (추천이 우선)
+    """다양한 말투의 사이즈 질문 감지 — 추천 요청은 추천이 우선"""
     if is_recommendation_question(user_text):
         return False
     q = user_text.replace(" ", "")
-    if any(k in q for k in ["사이즈", "맞을까", "맞을까요", "맞아", "맞나요", "핏", "작을까",
-                              "클까", "여유", "타이트", "내사이즈", "나한테맞", "나에게맞", "입을수있",
-                              "안맞겠지", "안맞을까", "사이즈안맞"]):
+
+    # 직접적 사이즈/핏 키워드
+    size_kws = [
+        "사이즈", "맞을까", "맞을까요", "맞아", "맞아요", "맞나요", "맞나",
+        "핏", "작을까", "작을까요", "클까", "클까요",
+        "여유", "여유있게", "여유있어", "여유있나요", "여유로워",
+        "타이트", "빡빡", "빡빡할", "빡빡해요",
+        "내사이즈", "나한테맞", "나에게맞", "제사이즈",
+        "입을수있", "살수있", "나올까", "나오나요", "나오는지",
+        "안맞겠지", "안맞을까", "안맞나요", "안맞아",
+        "될까", "될까요", "되나요", "돼요", "돼",
+        "가능해요", "가능한가요", "가능할까", "가능한지",
+        "살수있어", "살수있나요",
+        "입어도될", "입어도돼", "입어도되나",
+        "사이즈있어", "사이즈있나", "사이즈나와",
+    ]
+    if any(k in q for k in size_kws):
         return True
+
+    # 사이즈 숫자 포함
     if detect_size_from_text(user_text):
         return True
-    if re.search(r"이\s*옷.{0,10}(나한테|나에게|맞|어때|어울)", user_text):
-        return True
+
+    # 자연어 패턴
+    patterns = [
+        r"이\s*[옷거상품].{0,15}(나한테|나에게|내가|제가|맞|어때|어울|될까|가능|살|입)",
+        r"(나한테|나에게|내가|제가|저한테).{0,15}(맞|될|가능|입을|돼|살)",
+        r"(내|제)\s*(사이즈|몸|체형|키|몸무게).{0,10}(맞|될|가능|있|나)",
+        r"(이거|이옷|이상품|그거|그옷).{0,10}(될까|맞|가능|살|입|어때)",
+        r"(큰\s*사이즈|빅\s*사이즈|라지).{0,10}(있|나와|있나|있어)",
+        r"(내\s*몸|제\s*몸).{0,10}(맞|될|가능)",
+    ]
+    for pat in patterns:
+        if re.search(pat, user_text):
+            return True
+
+    # 체형 힌트 + 사이즈 의도
     body_hints = extract_user_body_from_text(user_text)
-    # 체형 힌트 + 사이즈/핏 관련 의도 키워드가 함께 있을 때만 사이즈 질문으로 판단
-    if body_hints and any(k in q for k in ["맞", "어때", "어울", "될까", "입을", "안맞", "역시"]):
-        # 단, 추천 요청과 겹칠 때는 추천으로 우선 처리 (is_recommendation이 먼저 체크됨)
+    if body_hints and any(k in q for k in ["맞", "어때", "어울", "될까", "입을", "안맞", "역시", "가능", "살"]):
         return True
+
     return False
-
-
 def is_name_question(user_text: str) -> bool:
     q = user_text.replace(" ", "")
     return any(k in q for k in ["이옷이름", "상품명", "상품이름", "이름뭐", "이옷이뭐야", "품명"])
@@ -398,14 +466,51 @@ def is_color_question(user_text: str) -> bool:
 
 
 def is_recommendation_question(user_text: str) -> bool:
-    return any(k in user_text for k in [
-        "추천", "어울리는", "같이 입", "코디", "매치",
-        "다른 바지", "다른 자켓", "다른 옷", "다른 상품", "다른 맨투맨", "다른 셔츠",
-        "다른 블라우스", "다른 가디건", "다른 니트", "다른 스커트", "다른 치마",
-        "다른 점퍼", "다른 아우터", "다른 자켓", "다른 원피스",
-        "어떤 바지", "어떤 자켓", "어떤 옷", "어떤 아우터", "어떤 점퍼",
-        "잘 어울리는", "비슷한 옷", "비슷한 상품",
-    ])
+    """다양한 말투의 추천/코디 요청 감지"""
+    q = user_text.replace(" ", "")
+
+    # ── 명시적 추천/코디 키워드
+    reco_kws = [
+        "추천", "추천해", "추천해줘", "추천해주세요", "추천좀", "추천부탁",
+        "골라줘", "골라줘요", "골라주세요", "골라봐줘",
+        "어울리는", "어울릴", "어울려", "어울리게",
+        "같이입", "같이입을", "함께입",
+        "코디", "코디해줘", "코디도와줘", "코디부탁",
+        "매치", "매치해줘",
+        "비슷한옷", "비슷한상품", "비슷한거",
+        "다른옷", "다른상품", "다른거", "다른걸로",
+        "다른자켓", "다른아우터", "다른바지", "다른점퍼", "다른맨투맨",
+        "다른셔츠", "다른블라우스", "다른가디건", "다른니트", "다른스커트",
+        "없어요", "없나요", "없어", "없을까",
+        "보여줘", "보여주세요", "봐줘", "봐주세요",
+        "뭐입", "뭘입", "무엇을입",
+    ]
+    if any(k in q for k in reco_kws):
+        return True
+
+    # ── 상황 기반 추천 패턴
+    situation_patterns = [
+        r"(학교|출근|모임|행사|파티|결혼식|데이트|친구|여행|산책|소풍).{0,20}(입|코디|추천|뭐|어떤|골라)",
+        r"(입고\s*갈|입을\s*만한|걸칠\s*만한|걸칠|입어야).{0,15}(거|것|옷|상품)",
+        r"(뭐\s*입|어떻게\s*입|어떤\s*옷|어떤\s*거).{0,10}(좋|나을|어울|될|살)",
+        r"(더\s*큰|빅|라지|큰\s*사이즈).{0,10}(없|있|나와|찾)",
+        r"(88|99|77반).{0,10}(되는|나오는|있는).{0,10}(자켓|아우터|옷|상품|점퍼|바지)",
+    ]
+    for pat in situation_patterns:
+        if re.search(pat, user_text):
+            return True
+
+    # 나한테 맞는 X 있어? 패턴
+    match_patterns = [
+        r"(나한테|나에게|내가|제가).{0,10}(맞는|어울리는|맞을).{0,15}(있|없|찾|줘|추천)",
+        r"(맞는|어울리는|어울릴).{0,10}(자켓|아우터|옷|바지|상품|점퍼|맨투맨|셔츠).{0,10}(있|없|찾|줘)",
+        r"(내|제)\s*(사이즈|몸).{0,10}(맞는|되는|가능한).{0,10}(있|없|찾)",
+    ]
+    for pat in match_patterns:
+        if re.search(pat, user_text):
+            return True
+
+    return False
 
 
 def get_fast_policy_answer(user_text: str) -> Optional[str]:
@@ -611,6 +716,9 @@ def infer_target_category_from_query(user_text: str, current_product: Dict) -> s
     ]:
         if any(k in q for k in kw):
             return cat
+    # 코디 세트 요청 ("코디할 아이템", "전체 코디", "코디 추천") → 아우터 우선
+    if any(k in q for k in ["코디할 아이템", "전체 코디", "세트 코디", "코디 세트", "코디 추천"]):
+        return "코디세트"
     # 현재 상품 기준으로 반대편 추천
     current_sub = clean_text(current_product.get("sub_category", ""))
     current_cat = clean_text(current_product.get("category", ""))
@@ -763,8 +871,15 @@ def build_size_answer(user_text: str, product_context: Dict, db_product: Optiona
         body_note = " 상체가 있는 편이라고 하셨으니 가슴/어깨 쪽 여유도 실측표로 같이 확인해보시는 게 좋아요."
 
     if size_eval["supported"] is False:
+        # ★ 77반→77까지 상품이면 경계+1로 부드럽게 안내
+        user_r = size_rank(user_size)
+        max_s = max_size or ""
+        max_r = SIZE_ORDER.get(max_s, 0) if max_s else 0
+        if user_r and max_r and user_r == max_r + 1:
+            return "고객님 {} {} 기준이면 {}은 딱 경계 사이즈 바로 위예요.\n이 상품은 최대 {}까지 나와서 핏이 살짝 빡빡하게 느껴질 수 있어요.\n실측표를 꼭 같이 보시는 게 안전해요.{}".format(
+                size_label, user_size, current_name, max_s, body_note)
         return "고객님 {} {} 기준이면 {}은 맞는 사이즈가 없어요.\n{}\n다른 상품을 같이 찾아봐드릴까요?{}".format(
-            size_label, user_size, current_name, reason or "이 상품은 최대 {}까지 나와요.".format(max_size), body_note)
+            size_label, user_size, current_name, reason or "이 상품은 최대 {}까지 나와요.".format(max_s), body_note)
     if size_eval["supported"] == "edge":
         return "고객님 {} {} 기준이면 {}은 가능은 하지만 딱 경계 사이즈예요.\n{}\n편하게 입는 걸 좋아하시면 실측표를 꼭 같이 보시는 게 안전해요.{}".format(
             size_label, user_size, current_name, reason or "상단 사이즈라 체감이 조금 타이트할 수 있어요.", body_note)
@@ -820,24 +935,46 @@ def recommend_products_for_query(
             # 자켓 + 점퍼 통합 (아우터 전체)
             if not (sub in {"자켓", "점퍼"} or any(k in row_name for k in ["자켓", "재킷", "점퍼", "야상", "코트", "패딩"])):
                 continue
-            # 사이즈: top_rank 있으면 체크, 없으면 통과 (사이즈 미입력 시에도 추천 가능)
-            if top_rank and ranks and top_rank not in ranks:
-                continue
-            score += 15
+            # 사이즈: top_rank 있으면 체크, 없으면 통과
+            # ★ 핵심 완화: max(ranks)+1까지 허용 (77반→77까지 자켓 경계 사이즈로 포함)
+            if top_rank and ranks:
+                max_r = max(ranks)
+                if top_rank > max_r + 1:  # max보다 2 이상 크면 제외
+                    continue
+                if top_rank == max_r + 1:  # 딱 경계+1이면 포함하되 낮은 점수
+                    score += 8
+                else:
+                    score += 15
+            else:
+                score += 15
             if sub == "자켓":
-                score += 3  # 자켓 우선 (선생님 방문 등 단정한 자리에 적합)
+                score += 3  # 자켓 우선
         elif target_category == "자켓":
             if not (sub == "자켓" or any(k in row_name for k in ["자켓", "재킷"])):
                 continue
-            if top_rank and ranks and top_rank not in ranks:
-                continue
-            score += 15
+            if top_rank and ranks:
+                max_r = max(ranks)
+                if top_rank > max_r + 1:
+                    continue
+                if top_rank == max_r + 1:
+                    score += 8
+                else:
+                    score += 15
+            else:
+                score += 15
         elif target_category == "점퍼":
             if not (sub == "점퍼" or any(k in row_name for k in ["점퍼", "야상"])):
                 continue
-            if top_rank and ranks and top_rank not in ranks:
-                continue
-            score += 15
+            if top_rank and ranks:
+                max_r = max(ranks)
+                if top_rank > max_r + 1:
+                    continue
+                if top_rank == max_r + 1:
+                    score += 8
+                else:
+                    score += 15
+            else:
+                score += 15
         elif target_category == "맨투맨":
             if not any(k in row_name for k in ["맨투맨", "후드", "스웨트"]):
                 continue
@@ -878,6 +1015,24 @@ def recommend_products_for_query(
             if not ("원피스" in sub or "원피스" in cat):
                 continue
             score += 15
+        elif target_category == "코디세트":
+            # 상의+하의+아우터 조합 → 자켓/슬랙스 우선
+            is_outer = sub in {"자켓", "점퍼"} or any(k in row_name for k in ["자켓", "재킷", "점퍼"])
+            is_bottom = sub in BOTTOM_SUB_CATS
+            is_top = sub in TOP_SUB_CATS and sub not in {"자켓", "점퍼"}
+            if not (is_outer or is_bottom or is_top):
+                continue
+            # 사이즈 필터 (아우터는 경계 허용)
+            if is_outer and top_rank and ranks:
+                if top_rank > max(ranks) + 1:
+                    continue
+            elif is_bottom and bottom_rank and ranks and bottom_rank not in ranks:
+                continue
+            elif is_top and top_rank and ranks and top_rank not in ranks:
+                continue
+            score += 12
+            if is_outer and sub == "자켓": score += 5  # 자켓 최우선
+            if is_bottom and "슬랙스" in sub: score += 3  # 슬랙스 우선
 
         blob = row_blob(rowd)
         for sit in situations:
@@ -920,6 +1075,53 @@ def recommend_products_for_query(
     return out
 
 
+
+def _db_size_availability(target_category: str, user_top: str, current_no: str) -> Dict:
+    """
+    DB 기준으로 해당 카테고리에서 고객 사이즈 수용 가능 상품 현황 반환
+    returns: {exact: [(name, size_range)], boundary: [(name, size_range)], none: bool}
+    """
+    if DB.empty or not user_top:
+        return {"exact": [], "boundary": [], "none": False}
+    user_r = size_rank(user_top)
+    if not user_r:
+        return {"exact": [], "boundary": [], "none": False}
+
+    cat_filter = {
+        "아우터": lambda sub, name: sub in {"자켓", "점퍼"} or any(k in name for k in ["자켓","재킷","점퍼","야상","코트"]),
+        "자켓": lambda sub, name: sub == "자켓" or any(k in name for k in ["자켓","재킷"]),
+        "점퍼": lambda sub, name: sub == "점퍼" or any(k in name for k in ["점퍼","야상"]),
+        "팬츠": lambda sub, name: sub in {"슬랙스","데님","팬츠"} or any(k in name for k in ["바지","팬츠","슬랙스","데님"]),
+        "맨투맨": lambda sub, name: any(k in name for k in ["맨투맨","후드","스웨트"]),
+        "블라우스": lambda sub, name: sub == "블라우스" or "블라우스" in name,
+        "셔츠": lambda sub, name: sub == "셔츠" or "셔츠" in name,
+        "니트": lambda sub, name: sub == "니트" or "니트" in name,
+        "가디건": lambda sub, name: sub == "가디건" or "가디건" in name,
+    }
+    fn = cat_filter.get(target_category)
+    if not fn:
+        return {"exact": [], "boundary": [], "none": False}
+
+    exact, boundary = [], []
+    for _, row in DB.iterrows():
+        pno = normalize_product_no(row.get("product_no", ""))
+        if current_no and pno == current_no:
+            continue
+        sub = clean_text(row.get("sub_category", ""))
+        name = clean_text(row.get("product_name", ""))
+        if not fn(sub, name):
+            continue
+        ranks = expand_size_text(clean_text(row.get("size_range", "")))
+        if not ranks:
+            continue
+        max_r = max(ranks)
+        if user_r in ranks:
+            exact.append((name, clean_text(row.get("size_range", ""))))
+        elif user_r == max_r + 1:
+            boundary.append((name, clean_text(row.get("size_range", ""))))
+
+    return {"exact": exact, "boundary": boundary, "none": len(exact) == 0 and len(boundary) == 0}
+
 def build_recommendation_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
     if not is_recommendation_question(user_text):
         return None
@@ -927,13 +1129,32 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
     body_ctx = build_body_context()
     target_category = infer_target_category_from_query(user_text, current_product)
     is_re_request = any(k in user_text for k in ["다른", "또 다른", "더 없어", "다른 거"])
-    already = {r["product_name"] for r in (st.session_state.get("last_recommendations") or [])}
+    prev_recos = st.session_state.get("last_recommendations") or []
+    already = {r["product_name"] for r in prev_recos}
+    # ★ 같은 카테고리를 다시 요청하는 경우도 이전 추천 제외 (단순 반복 방지)
+    if prev_recos and not is_re_request:
+        prev_cat = infer_target_category_from_query(
+            " ".join(r.get("sub_category","") for r in prev_recos[:1]),
+            current_product
+        )
+        curr_cat = infer_target_category_from_query(user_text, current_product)
+        if prev_cat and curr_cat and prev_cat == curr_cat:
+            is_re_request = True
     exclude = already if is_re_request else set()
     recos = recommend_products_for_query(user_text, current_product, body_ctx, target_category, 3, exclude)
     if not recos and is_re_request:
         recos = recommend_products_for_query(user_text, current_product, body_ctx, target_category, 3)
     if not recos:
-        return "지금 조건에 맞는 {} 상품을 찾기 어렵네요. 카테고리나 사이즈를 조금 다르게 말씀해주시면 다시 찾아볼게요 :)".format(target_category or "")
+        # 자켓 경계 사이즈(77반→77)인 경우 경계 허용 재시도
+        if target_category in ["자켓", "아우터"] and top_rank:
+            recos = recommend_products_for_query(user_text, current_product, body_ctx, target_category, 3, set())
+        if not recos:
+            size_note = ""
+            body_ctx_vals = build_body_context()
+            top_s = clean_text(body_ctx_vals.get("top_size", ""))
+            if top_s:
+                size_note = " (고객님 {} 기준 경계 사이즈 상품도 함께 봐드릴 수 있어요.)".format(top_s)
+            return "지금 조건에서 딱 맞는 {} 상품을 찾기 어렵네요.{} 카테고리나 사이즈를 조금 다르게 말씀해주시면 다시 찾아볼게요 :)".format(target_category or "", size_note)
     save_recommendations(recos)
     situations = detect_situation_from_text(user_text)
     if situations:
@@ -950,6 +1171,9 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
         opener = "네, 사이즈에 맞는 점퍼 쪽으로 먼저 골라드릴게요."
     elif target_category == "맨투맨":
         opener = "네, 고객님 사이즈에 맞는 맨투맨으로 골라드릴게요."
+    elif target_category == "코디세트":
+        situations_str = situations[0] if situations else "모임"
+        opener = "네, {} 자리에 맞는 코디 아이템들을 골라드릴게요 :) 자켓 → 하의 순으로 봐드릴게요.".format(situations_str)
     elif is_re_request:
         opener = "네, 다른 쪽으로 더 골라드릴게요."
     else:
