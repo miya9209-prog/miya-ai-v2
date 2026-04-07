@@ -1,3 +1,5 @@
+import io
+import zipfile
 import os
 import re
 import json
@@ -5,6 +7,7 @@ import html
 import time
 from typing import Optional, Dict, List, Tuple
 from urllib.parse import urlparse, parse_qs
+from datetime import datetime
 
 import pandas as pd
 import requests
@@ -130,7 +133,10 @@ def ensure_state() -> None:
         "last_user_hash": "",
         "last_user_ts": 0.0,
         "last_answer": "",
-        "last_recommendations": [],
+        "session_id": "",
+        "_miya_last_llm_error": "",
+        "_miya_last_llm_error_text": "",
+        "_miya_last_llm_latency": 0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -138,6 +144,61 @@ def ensure_state() -> None:
 
 
 ensure_state()
+if not st.session_state.session_id:
+    st.session_state.session_id = str(int(time.time() * 1000))
+
+
+def log_event(event_type: str, data: Optional[Dict] = None) -> None:
+    data = data or {}
+    try:
+        now = datetime.now()
+        os.makedirs("logs", exist_ok=True)
+        filename = os.path.join("logs", f"miya_log_{now.strftime('%Y-%m')}.csv")
+        row = {
+            "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "event_type": event_type,
+            "session_id": clean_text(st.session_state.get("session_id", "")),
+            "product_no": clean_text(data.get("product_no", "") or st.session_state.get("current_product_no", "")),
+            "product_name": clean_text(data.get("product_name", "") or st.session_state.get("current_product_name", "")),
+            "user_text": clean_text(data.get("user_text", "")),
+            "response_mode": clean_text(data.get("response_mode", "")),
+            "fallback_reason": clean_text(data.get("fallback_reason", "")),
+            "is_fallback": bool(data.get("is_fallback", False)),
+            "error_text": clean_text(data.get("error_text", "")),
+            "latency_ms": int(data.get("latency_ms", 0) or 0),
+        }
+        df = pd.DataFrame([row])
+        if os.path.exists(filename):
+            df.to_csv(filename, mode="a", header=False, index=False, encoding="utf-8-sig")
+        else:
+            df.to_csv(filename, index=False, encoding="utf-8-sig")
+    except Exception:
+        pass
+
+
+def get_log_file_paths() -> List[str]:
+    try:
+        log_dir = "logs"
+        if not os.path.exists(log_dir):
+            return []
+        files = []
+        for name in os.listdir(log_dir):
+            lower = name.lower()
+            if lower.endswith((".csv", ".jsonl", ".log")):
+                files.append(os.path.join(log_dir, name))
+        return sorted(files)
+    except Exception:
+        return []
+
+
+def build_logs_zip_bytes(file_paths: List[str]) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in file_paths:
+            if os.path.exists(path):
+                zf.write(path, arcname=os.path.basename(path))
+    buf.seek(0)
+    return buf.getvalue()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -676,150 +737,6 @@ def build_product_reason(rowd: Dict, user_text: str) -> List[str]:
     return out[:2]
 
 
-
-
-def save_recommendations(recos: List[Dict]) -> None:
-    try:
-        cleaned: List[Dict] = []
-        for reco in recos:
-            rowd = reco.get("_full_row", {}) if isinstance(reco, dict) else {}
-            cleaned.append({
-                "product_name": clean_text(reco.get("product_name", "")),
-                "product_no": normalize_product_no(clean_text(rowd.get("product_no", "") or reco.get("product_no", ""))),
-                "category": clean_text(reco.get("category", "")),
-                "sub_category": clean_text(reco.get("sub_category", "")),
-                "size_range": clean_text(reco.get("size_range", "")),
-                "reasons": reco.get("reasons", [])[:2] if isinstance(reco, dict) else [],
-                "_full_row": rowd if isinstance(rowd, dict) else {},
-            })
-        st.session_state.last_recommendations = cleaned
-    except Exception:
-        st.session_state.last_recommendations = []
-
-def get_recommendation_reference_index(user_text: str) -> Optional[int]:
-    q = clean_text(user_text).replace(" ", "")
-    mapping = {
-        0: ["1번", "첫번째", "첫번째상품", "첫번째옷", "첫번째바지", "첫째"],
-        1: ["2번", "두번째", "두번째상품", "두번째옷", "두번째바지", "둘째"],
-        2: ["3번", "세번째", "세번째상품", "세번째옷", "세번째바지", "셋째"],
-    }
-    for idx, words in mapping.items():
-        if any(w in q for w in words):
-            return idx
-    if any(w in q for w in ["방금추천", "추천해준", "그거", "그상품", "그옷", "그바지"]):
-        return 0
-    return None
-
-def get_followup_recommendation(user_text: str) -> Optional[Dict]:
-    idx = get_recommendation_reference_index(user_text)
-    recos = st.session_state.get("last_recommendations", []) or []
-    if idx is None or idx >= len(recos):
-        return None
-    return recos[idx]
-
-def recommendation_to_context(reco: Dict) -> Tuple[Dict, Optional[Dict]]:
-    rowd = reco.get("_full_row", {}) if isinstance(reco, dict) else {}
-    db_like = rowd if rowd else {
-        "product_no": clean_text(reco.get("product_no", "")),
-        "product_name": clean_text(reco.get("product_name", "")),
-        "category": clean_text(reco.get("category", "")),
-        "sub_category": clean_text(reco.get("sub_category", "")),
-        "size_range": clean_text(reco.get("size_range", "")),
-    }
-    raw_blob = " ".join([
-        clean_text(db_like.get("product_name", "")),
-        clean_text(db_like.get("category", "")),
-        clean_text(db_like.get("sub_category", "")),
-        clean_text(db_like.get("fit_type", "")),
-        clean_text(db_like.get("body_cover_features", "")),
-        clean_text(db_like.get("style_tags", "")),
-        clean_text(db_like.get("coordination_items", "")),
-        clean_text(db_like.get("product_summary", "")),
-        clean_text(db_like.get("fabric", "")),
-        clean_text(db_like.get("size_range", "")),
-        clean_text(db_like.get("color_options", "")),
-    ])
-    context = {
-        "product_no": normalize_product_no(clean_text(db_like.get("product_no", ""))),
-        "product_name": clean_text(db_like.get("product_name", "") or reco.get("product_name", "") or "추천드린 상품"),
-        "category": clean_text(db_like.get("category", "") or reco.get("category", "") or "기타"),
-        "sub_category": clean_text(db_like.get("sub_category", "") or reco.get("sub_category", "")),
-        "summary": clean_text(db_like.get("product_summary", "")),
-        "material": clean_text(db_like.get("fabric", "")),
-        "fit": " / ".join([x for x in [clean_text(db_like.get("fit_type", "")), clean_text(db_like.get("body_cover_features", ""))] if x]),
-        "size_tip": clean_text(db_like.get("size_range", "") or reco.get("size_range", "")),
-        "raw_excerpt": raw_blob,
-        "colors": parse_color_options({"raw_excerpt": raw_blob}, db_like if db_like else None),
-    }
-    return context, db_like
-
-def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
-    reco = get_followup_recommendation(user_text)
-    if not reco:
-        return None
-    reco_context, reco_db = recommendation_to_context(reco)
-    idx = (get_recommendation_reference_index(user_text) or 0) + 1
-    q = clean_text(user_text)
-
-    if is_name_question(user_text) or any(k in q for k in ["어떤 옷", "어떤 바지", "어떤 상품", "설명", "알려줘", "뭐야"]):
-        reasons = [clean_text(x) for x in reco.get("reasons", []) if clean_text(x)]
-        reason_line = " ".join(reasons[:2]) if reasons else "지금 문의하신 자리랑 잘 어울리는 쪽으로 먼저 골라드린 상품이에요."
-        return (
-            f"{idx}번으로 추천드린 상품은 {reco_context['product_name']}이에요 :)\n"
-            f"{reason_line}\n"
-            "원하시면 이 상품 기준으로 사이즈감도 바로 이어서 봐드릴게요."
-        )
-
-    if is_size_question(user_text):
-        body = build_body_context()
-        user_top = clean_text(body.get("top_size", ""))
-        if not user_top:
-            return f"{idx}번으로 추천드린 {reco_context['product_name']} 기준으로 보려면 고객님 평소 상의 사이즈를 먼저 알려주세요 :)"
-        size_eval = evaluate_size_support(user_top, reco_context, reco_db)
-        matched = size_eval.get("matched_option")
-        reason = clean_text(size_eval.get("reason", ""))
-        name = reco_context["product_name"]
-        if size_eval["supported"] is False:
-            return (
-                f"{idx}번으로 추천드린 {name}은 고객님 상의 {user_top} 기준이면 넉넉하게 맞는 쪽으로 보긴 어려워요.\n"
-                f"{reason or '현재 확인되는 사이즈 범위가 고객님보다 작게 잡혀 있어요.'}\n"
-                "편하게 입는 기준이라면 강하게 추천드리긴 어렵고, 조금 더 여유 있는 쪽을 같이 보시는 게 안전해요."
-            )
-        if size_eval["supported"] == "edge":
-            label = matched["label"] if matched else "현재 옵션"
-            return (
-                f"{idx}번으로 추천드린 {name}은 고객님 상의 {user_top} 기준이면 가능권에는 들어오지만 경계선에 가까워요.\n"
-                f"{reason or (label + ' 기준으로 상단 사이즈에 가까워 보여요.')}\n"
-                "딱 맞는 느낌으로는 가능할 수 있지만, 여유 있게 입으실 거면 조금 더 편한 쪽이 나을 수 있어요."
-            )
-        if size_eval["supported"] is True:
-            if matched:
-                return (
-                    f"{idx}번으로 추천드린 {name}은 고객님 상의 {user_top} 기준이면 {matched['label']} 쪽으로 보시면 돼요 :)\n"
-                    f"{reason or '현재 확인되는 범위 안쪽으로 보여요.'}\n"
-                    "부담 없이 입는 쪽으로는 비교적 안정적인 편이에요."
-                )
-            return (
-                f"{idx}번으로 추천드린 {name}은 고객님 상의 {user_top} 기준으로 현재 확인되는 권장 범위 안에 있어요 :)\n"
-                f"{reason}\n"
-                "실측까지 같이 보면 더 정확하지만, 지금 기준으로는 무리 없는 편으로 보여요."
-            )
-        db_range = clean_text((reco_db or {}).get("size_range", ""))
-        if db_range:
-            return (
-                f"{idx}번으로 추천드린 {name}은 현재 {db_range} 쪽으로 먼저 안내되는 상품이에요 :)\n"
-                "지금 정보만으로 딱 잘라 말씀드리기보다는 실측을 같이 보면 더 정확해요."
-            )
-        return f"{idx}번으로 추천드린 {name}은 지금 보이는 정보만으로는 확답보다 실측을 같이 보는 쪽이 더 정확해요 :)"
-
-    if is_color_question(user_text):
-        ans = build_color_answer(reco_context, reco_db)
-        if ans:
-            return f"{idx}번으로 추천드린 {reco_context['product_name']} 기준으로 보면, {ans}"
-        return f"{idx}번으로 추천드린 {reco_context['product_name']}은 현재 컬러 정보가 또렷하게 확인되진 않아요."
-
-    return None
-
 def recommend_products_for_query(user_text: str, current_product: Dict, body_ctx: Dict[str, str], limit: int = 3) -> List[Dict]:
     if DB.empty:
         return []
@@ -973,7 +890,6 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
     recos = recommend_products_for_query(user_text, current_product, body_ctx, limit=3)
     if not recos:
         return None
-    save_recommendations(recos)
     opener = "네, 이 상품이랑 같이 입기 좋은 쪽으로 먼저 골라드릴게요."
     target = infer_target_category_from_query(user_text, current_product)
     if target == "팬츠":
@@ -1035,12 +951,16 @@ def call_llm(user_text: str, product_context: Dict, db_product: Optional[Dict]) 
     pack = slim_current_context(product_context, db_product, user_text)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "system", "content": "참고 데이터(JSON):\n" + json.dumps(pack, ensure_ascii=False)},
+        {"role": "system", "content": "참고 데이터(JSON):\\n" + json.dumps(pack, ensure_ascii=False)},
     ]
     for m in st.session_state.messages[-4:]:
         messages.append({"role": m["role"], "content": trim_text(m["content"], 300)})
     messages.append({"role": "user", "content": trim_text(user_text, 350)})
+    st.session_state._miya_last_llm_error = ""
+    st.session_state._miya_last_llm_error_text = ""
+    st.session_state._miya_last_llm_latency = 0
     last_error = None
+    started = time.time()
     for wait in (0, 1.2):
         if wait:
             time.sleep(wait)
@@ -1054,6 +974,7 @@ def call_llm(user_text: str, product_context: Dict, db_product: Optional[Dict]) 
             content = clean_text(resp.choices[0].message.content or "")
             if not content:
                 continue
+            st.session_state._miya_last_llm_latency = int((time.time() - started) * 1000)
             return content
         except (RateLimitError, APITimeoutError, APIError) as e:
             last_error = e
@@ -1061,6 +982,9 @@ def call_llm(user_text: str, product_context: Dict, db_product: Optional[Dict]) 
         except Exception as e:
             last_error = e
             break
+    st.session_state._miya_last_llm_error = type(last_error).__name__ if last_error else "llm_error"
+    st.session_state._miya_last_llm_error_text = clean_text(str(last_error)) if last_error else ""
+    st.session_state._miya_last_llm_latency = int((time.time() - started) * 1000)
     print(f"[MIYA LLM ERROR] {type(last_error).__name__}: {last_error}")
     return None
 
@@ -1092,24 +1016,59 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
     st.session_state.last_user_ts = now
     st.session_state.is_processing = True
     st.session_state.messages.append({"role": "user", "content": user_text})
+    log_event("user_message", {"user_text": user_text})
     try:
-        followup_answer = build_followup_recommendation_answer(user_text)
         # deterministic answers first
         direct_answers = [
-            followup_answer,
-            build_name_answer(product_context, db_product) if is_name_question(user_text) else None,
-            get_fast_policy_answer(user_text),
-            build_size_answer(user_text, product_context, db_product),
-            build_recommendation_answer(user_text, product_context, db_product),
-            build_color_answer(product_context, db_product) if is_color_question(user_text) else None,
+            ("name", build_name_answer(product_context, db_product) if is_name_question(user_text) else None),
+            ("policy", get_fast_policy_answer(user_text)),
+            ("size", build_size_answer(user_text, product_context, db_product)),
+            ("recommendation", build_recommendation_answer(user_text, product_context, db_product)),
+            ("color", build_color_answer(product_context, db_product) if is_color_question(user_text) else None),
         ]
-        answer = next((a for a in direct_answers if a), None)
+        answer = None
+        response_mode = ""
+        for mode, candidate in direct_answers:
+            if candidate:
+                answer = candidate
+                response_mode = mode
+                break
         if not answer and llm_can_help(user_text):
             answer = call_llm(user_text, product_context, db_product)
+            if answer:
+                response_mode = "llm"
         if not answer:
+            fallback_reason = clean_text(st.session_state.get("_miya_last_llm_error", "")) or "safe_llm_fallback"
+            error_text = clean_text(st.session_state.get("_miya_last_llm_error_text", ""))
             answer = safe_llm_fallback(user_text, product_context, db_product)
+            response_mode = "fallback"
+            log_event("fallback", {
+                "user_text": user_text,
+                "response_mode": response_mode,
+                "fallback_reason": fallback_reason,
+                "is_fallback": True,
+                "error_text": error_text,
+                "latency_ms": st.session_state.get("_miya_last_llm_latency", 0),
+            })
+            if error_text:
+                log_event("error", {
+                    "user_text": user_text,
+                    "response_mode": response_mode,
+                    "fallback_reason": fallback_reason,
+                    "is_fallback": True,
+                    "error_text": error_text,
+                    "latency_ms": st.session_state.get("_miya_last_llm_latency", 0),
+                })
         st.session_state.last_answer = answer
         st.session_state.messages.append({"role": "assistant", "content": answer})
+        log_event("assistant_response", {
+            "user_text": user_text,
+            "response_mode": response_mode or "assistant",
+            "fallback_reason": clean_text(st.session_state.get("_miya_last_llm_error", "")) if response_mode == "fallback" else "",
+            "is_fallback": response_mode == "fallback",
+            "error_text": clean_text(st.session_state.get("_miya_last_llm_error_text", "")) if response_mode == "fallback" else "",
+            "latency_ms": st.session_state.get("_miya_last_llm_latency", 0) if response_mode in ["llm", "fallback"] else 0,
+        })
     finally:
         st.session_state.is_processing = False
 
@@ -1127,7 +1086,6 @@ if context_key != st.session_state.last_context_key:
     st.session_state.messages = []
     st.session_state.last_user_hash = ""
     st.session_state.last_answer = ""
-    st.session_state.last_recommendations = []
 
 product_context = fetch_product_context(current_url, product_name_q, product_no) if current_url else {
     "product_no": product_no,
@@ -1143,6 +1101,9 @@ product_context = fetch_product_context(current_url, product_name_q, product_no)
 db_product = get_db_product(product_no)
 if db_product and clean_text(db_product.get("product_name", "")):
     product_context["product_name"] = clean_text(db_product.get("product_name", ""))
+
+st.session_state.current_product_no = clean_text(product_context.get("product_no", ""))
+st.session_state.current_product_name = clean_text(product_context.get("product_name", ""))
 
 # ---------- UI ----------
 st.markdown("""
@@ -1217,6 +1178,38 @@ body_summary = build_body_context_text(build_body_context())
 if any(build_body_context().values()):
     st.markdown(f'<div style="margin-top:2px; margin-bottom:2px; font-size:10.8px; color:#7a7f8c;">현재 입력 정보: {html.escape(body_summary)}</div>', unsafe_allow_html=True)
 
+def render_admin_tools():
+    with st.expander("관리자 도구", expanded=False):
+        st.caption("운영자 전용 로그 다운로드")
+        admin_code = st.text_input("관리자 코드", type="password", key="miya_admin_code")
+        if admin_code == "qawsed1323":
+            log_files = get_log_file_paths()
+            if log_files:
+                latest_log = log_files[-1]
+                st.caption(f"최신 로그 파일: {os.path.basename(latest_log)}")
+                with open(latest_log, "rb") as f:
+                    st.download_button(
+                        "최신 로그 다운로드",
+                        data=f.read(),
+                        file_name=os.path.basename(latest_log),
+                        mime="text/csv",
+                        key="miya_download_latest_log"
+                    )
+                zip_bytes = build_logs_zip_bytes(log_files)
+                st.download_button(
+                    "전체 로그 ZIP 다운로드",
+                    data=zip_bytes,
+                    file_name="miya_logs.zip",
+                    mime="application/zip",
+                    key="miya_download_all_logs_zip"
+                )
+            else:
+                st.info("아직 생성된 로그 파일이 없습니다. 상담 후 다시 확인해주세요.")
+        elif admin_code:
+            st.warning("관리자 코드가 올바르지 않습니다.")
+
+render_admin_tools()
+
 if not st.session_state.messages:
     current_url_lower = (current_url or "").lower()
     is_detail_page = ("/product/detail" in current_url_lower) or ("product_no=" in current_url_lower) or bool(product_no)
@@ -1256,6 +1249,8 @@ for msg in st.session_state.messages:
             '</div></div>',
             unsafe_allow_html=True,
         )
+
+
 
 user_input = st.chat_input("메시지를 입력하세요...")
 if user_input:
