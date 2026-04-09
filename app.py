@@ -196,6 +196,7 @@ def ensure_state() -> None:
         "is_processing": False, "last_user_hash": "", "last_user_ts": 0.0,
         "last_answer": "", "last_recommendations": [],
         "session_id": _new_session_id(),  # 관리프로그램 연동용 세션 ID
+        "last_mentioned_reco_idx": None,  # 마지막으로 명시 언급된 추천 번호
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -884,10 +885,10 @@ def infer_target_category_from_query(user_text: str, current_product: Dict) -> s
         (["점퍼", "야상"], "점퍼"),
         (["맨투맨", "후드", "스웨트"], "맨투맨"),
         (["블라우스"], "블라우스"),
+        (["티셔츠", "반팔티", "반소매티", "기본티"], "티셔츠"),  # ★ 셔츠보다 먼저
         (["셔츠"], "셔츠"),
         (["가디건"], "가디건"),
         (["니트"], "니트"),
-        (["티셔츠", "반팔"], "티셔츠"),
         (["원피스"], "원피스"),
     ]:
         if any(k in q for k in kw):
@@ -1052,13 +1053,19 @@ def get_recommendation_reference_index(user_text: str) -> Optional[int]:
     for idx, words in mapping.items():
         if any(w in q for w in words):
             return idx
-    # 추천 결과 전체 참조 표현 → idx=0 (가장 최근 추천 기준)
+    # "그 상품", "그거" 등 → 마지막으로 명시된 번호 우선 사용
+    # st.session_state.last_mentioned_reco_idx에 저장된 값 활용
     followup_kws = [
         "방금추천", "추천해준", "추천한거", "추천한게", "추천해준게",
         "그거", "그상품", "그옷", "그바지", "그자켓", "그아우터",
         "방금거", "아까거", "아까추천",
+        "그상품으로", "그걸로", "거기로",
     ]
     if any(w in q for w in followup_kws):
+        # 마지막으로 명시 언급된 번호가 있으면 그걸 사용
+        last_idx = st.session_state.get("last_mentioned_reco_idx", None)
+        if last_idx is not None:
+            return last_idx
         return 0
     return None
 def get_followup_recommendation(user_text: str) -> Optional[Dict]:
@@ -1454,9 +1461,15 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
     for i, reco in enumerate(recos, 1):
         reason_text = " ".join((reco.get("reasons") or [])[:2]).strip()
         size_info = " ({})".format(reco["size_range"]) if reco.get("size_range") else ""
-        lines.append("{}. {}{} — {}".format(i, reco["product_name"], size_info, reason_text) if reason_text
-                     else "{}. {}{}".format(i, reco["product_name"], size_info))
-    lines.append("마음 가는 번호 말씀해주시면 그 상품 기준으로 사이즈감도 바로 이어서 봐드릴게요 :)")
+        # 상품 링크 생성
+        pno = clean_text(reco.get("product_no", "") or (reco.get("_full_row") or {}).get("product_no", ""))
+        purl = clean_text(reco.get("product_url", "") or (reco.get("_full_row") or {}).get("product_url", ""))
+        if not purl and pno:
+            purl = "https://www.misharp.co.kr/product/detail.html?product_no={}".format(pno)
+        link_part = " [🔗]({})".format(purl) if purl else ""
+        lines.append("{}. {}{}{} — {}".format(i, reco["product_name"], size_info, link_part, reason_text) if reason_text
+                     else "{}. {}{}{}".format(i, reco["product_name"], size_info, link_part))
+    lines.append("번호 말씀해주시면 사이즈감 바로 확인해드릴게요 :)")
     return "\n".join(lines)
 
 
@@ -1593,6 +1606,13 @@ def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
     ref_idx = get_recommendation_reference_index(user_text)
     q_raw = user_text.replace(" ", "")
 
+    # ★ 명시적 번호(1번/2번/3번) 언급 시 last_mentioned_reco_idx 업데이트
+    _explicit_mapping = {"1번":0,"첫번째":0,"첫째":0,"2번":1,"두번째":1,"둘째":1,"3번":2,"세번째":2,"셋째":2}
+    for _kw, _i in _explicit_mapping.items():
+        if _kw in q_raw:
+            st.session_state.last_mentioned_reco_idx = _i
+            break
+
     if is_recommendation_question(user_text):
         # 번호 상품을 기준 상품으로 해서 추천
         fake_product = current_product_dict(reco_context, reco_db)
@@ -1614,9 +1634,14 @@ def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
             for i2, r in enumerate(recos, 1):
                 reason_text = " ".join((r.get("reasons") or [])[:2]).strip()
                 size_info = " ({})".format(r["size_range"]) if r.get("size_range") else ""
-                lines.append("{}. {}{} — {}".format(i2, r["product_name"], size_info, reason_text) if reason_text
-                             else "{}. {}{}".format(i2, r["product_name"], size_info))
-            lines.append("마음 가는 번호 말씀해주시면 사이즈감도 바로 봐드릴게요 :)")
+                pno2 = clean_text(r.get("product_no", "") or (r.get("_full_row") or {}).get("product_no", ""))
+                purl2 = clean_text(r.get("product_url", "") or (r.get("_full_row") or {}).get("product_url", ""))
+                if not purl2 and pno2:
+                    purl2 = "https://www.misharp.co.kr/product/detail.html?product_no={}".format(pno2)
+                link2 = " [🔗]({})".format(purl2) if purl2 else ""
+                lines.append("{}. {}{}{} — {}".format(i2, r["product_name"], size_info, link2, reason_text) if reason_text
+                             else "{}. {}{}{}".format(i2, r["product_name"], size_info, link2))
+            lines.append("번호 말씀해주시면 사이즈감도 바로 봐드릴게요 :)")
             return "\n".join(lines)
         # 추천 결과 없으면 fallback
         return "{}번 {} 기준으로 조건에 맞는 상품을 찾기 어렵네요. 카테고리를 조금 다르게 말씀해주시면 다시 찾아볼게요 :)".format(idx, name)
@@ -2062,6 +2087,9 @@ if context_key != st.session_state.last_context_key:
     st.session_state.last_user_hash = ""
     st.session_state.last_answer = ""
     st.session_state.last_recommendations = []
+    st.session_state.last_mentioned_reco_idx = None
+    # ★ 사이즈/체형 정보는 상품이 바뀌어도 유지 (고객이 다시 입력 안 해도 됨)
+    # body_top, body_bottom, body_height, body_weight → 초기화 하지 않음
 
 product_context = fetch_product_context(current_url, product_name_q, product_no) if current_url else {
     "product_no": product_no, "product_name": "지금 보시는 상품",
@@ -2103,8 +2131,14 @@ div[data-testid="stChatInput"] button svg {fill:#ffffff!important;}
 st.markdown(
     """
     <div style="text-align:center; margin:0 0 16px 0;">
-      <div style="font-size:31px; font-weight:800; line-height:1.1; letter-spacing:-0.02em; color:#303443;">
-        미샵 쇼핑친구 <span style="color:#0f6a63;">미야언니</span>
+      <div style="display:inline-flex; align-items:center; gap:8px;">
+        <span style="font-size:31px; font-weight:800; line-height:1.1; letter-spacing:-0.02em; color:#303443;">
+          미샵 쇼핑친구 <span style="color:#0f6a63;">미야언니</span>
+        </span>
+        <span style="display:inline-block; font-size:10px; font-weight:700; letter-spacing:0.08em;
+                     color:#ffffff; background:#0f6a63; border-radius:4px;
+                     padding:2px 6px; vertical-align:middle; line-height:1.4;
+                     position:relative; top:-6px;">BETA</span>
       </div>
       <div style="margin-top:6px; font-size:13.5px; line-height:1.35; color:#5f6471;">
         24시간 쇼핑 결정에 도움드리는 스마트한 쇼핑친구
@@ -2150,11 +2184,27 @@ if not st.session_state.messages:
     current_url_lower = (current_url or "").lower()
     is_detail_page = ("/product/detail" in current_url_lower) or ("product_no=" in current_url_lower) or bool(product_no)
     product_display_name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "")
+    saved_top = clean_text(st.session_state.get("body_top", ""))
+    saved_bottom = clean_text(st.session_state.get("body_bottom", ""))
+    has_saved_size = bool(saved_top or saved_bottom)
+
     if is_detail_page and product_display_name and product_display_name != "지금 보시는 상품":
-        welcome = (
-            f"안녕하세요 :) {product_display_name} 보고 계시는 거죠?\n"
-            "사이즈, 코디, 소재, 배송 중 뭐부터 이야기해볼까요?"
-        )
+        if has_saved_size:
+            # 이전 사이즈 입력이 있는 경우 → 유지 안내 + 새 상품 상담 시작 명시
+            size_parts = []
+            if saved_top: size_parts.append(f"상의 {saved_top}")
+            if saved_bottom: size_parts.append(f"하의 {saved_bottom}")
+            size_note = ", ".join(size_parts)
+            welcome = (
+                f"✨ {product_display_name} 상담을 시작할게요.\n\n"
+                f"이전에 입력하신 사이즈 정보({size_note})는 그대로 유지돼요 :)\n"
+                "사이즈, 코디, 소재, 배송 중 뭐부터 이야기해볼까요?"
+            )
+        else:
+            welcome = (
+                f"안녕하세요 :) {product_display_name} 보고 계시는 거죠?\n"
+                "사이즈, 코디, 소재, 배송 중 뭐부터 이야기해볼까요?"
+            )
     elif is_detail_page:
         welcome = (
             "안녕하세요? 옷 같이 봐드리는 미야언니예요 :)\n"
@@ -2172,7 +2222,28 @@ if not st.session_state.messages:
 st.divider()
 
 for msg in st.session_state.messages:
-    safe_text = html.escape(msg["content"]).replace("\n", "<br>")
+    # 마크다운 링크 [text](url) → HTML <a> 태그로 먼저 변환 (escape 전에)
+    _content = msg["content"]
+    import re as _re
+    def _replace_link(m):
+        text, url = m.group(1), m.group(2)
+        # Cafe24 팝업 구조: opener(부모 창)의 URL을 바꾸면 팝업도 같이 갱신됨
+        # onclick으로 부모창 이동 + 팝업 URL 동기화 시도, 실패 시 새 탭
+        onclick = (
+            "try{{"
+            "if(window.opener&&!window.opener.closed){{"
+            "window.opener.location.href='{url}';"
+            "setTimeout(function(){{window.location.href=window.location.href;}},400);"
+            "}}else{{window.open('{url}','_blank');}};"
+            "}}catch(e){{window.open('{url}','_blank');}}"
+            "return false;"
+        ).format(url=url)
+        return '<a href="{url}" onclick="{onclick}" style="color:#0f6a63;text-decoration:none;font-weight:700;">{text}</a>'.format(
+            url=url, onclick=onclick, text=html.escape(text))
+    _content_with_links = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _replace_link, _content)
+    safe_text = html.escape(_content_with_links, quote=False).replace("\n", "<br>")
+    # html.escape로 인해 a 태그가 깨지는 걸 방지 → a 태그는 이미 처리했으므로 &lt;a 를 복원
+    safe_text = safe_text.replace("&lt;a ", "<a ").replace("&lt;/a&gt;", "</a>").replace('href=\"', 'href="').replace('\">', '">').replace("&gt;", ">")
     if msg["role"] == "user":
         st.markdown(
             '<div style="display:flex; justify-content:flex-end; width:100%; margin:2px 0 4px 0;">'
