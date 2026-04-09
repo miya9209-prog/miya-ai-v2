@@ -2221,19 +2221,17 @@ if not st.session_state.messages:
 
     if is_detail_page and product_display_name and product_display_name != "지금 보시는 상품":
         if has_saved_size:
-            # 이전 사이즈 입력이 있는 경우 → 유지 안내 + 새 상품 상담 시작 명시
             size_parts = []
             if saved_top: size_parts.append(f"상의 {saved_top}")
             if saved_bottom: size_parts.append(f"하의 {saved_bottom}")
             size_note = ", ".join(size_parts)
             welcome = (
-                f"✨ {product_display_name} 상담을 시작할게요.\n\n"
-                f"이전에 입력하신 사이즈 정보({size_note})는 그대로 유지돼요 :)\n"
-                "사이즈, 코디, 소재, 배송 중 뭐부터 이야기해볼까요?"
+                f"✨ {product_display_name} 상담으로 새로 시작할게요 :)\n"
+                f"이전 사이즈({size_note})는 그대로 유지돼요 — 바로 질문해주세요!"
             )
         else:
             welcome = (
-                f"안녕하세요 :) {product_display_name} 보고 계시는 거죠?\n"
+                f"✨ {product_display_name} 상담으로 새로 시작할게요 :)\n"
                 "사이즈, 코디, 소재, 배송 중 뭐부터 이야기해볼까요?"
             )
     elif is_detail_page:
@@ -2258,19 +2256,27 @@ for msg in st.session_state.messages:
     import re as _re
     def _replace_link(m):
         text, url = m.group(1), m.group(2)
-        # Cafe24 팝업 구조: opener(부모 창)의 URL을 바꾸면 팝업도 같이 갱신됨
-        # onclick으로 부모창 이동 + 팝업 URL 동기화 시도, 실패 시 새 탭
+        # ★ 🔗 클릭 시 동작:
+        # 1. 미샵 메인 창 → 상품 상세페이지 이동
+        # 2. 챗봇 팝업 → 새 상품 URL로 리로드 (새 상품 인식 + 사이즈 유지)
+        safe_text = text.replace("'", "\'").replace('"', '&quot;')
+        safe_url = url.replace("'", "\'")
         onclick = (
             "try{{"
+            "var _pno='';"
+            "try{{var _u=new URL('" + safe_url + "');_pno=_u.searchParams.get('product_no')||'';}}catch(_e){{}}"
+            "var _pname=encodeURIComponent('" + safe_text + "');"
+            "var _eu=encodeURIComponent('" + safe_url + "');"
             "if(window.opener&&!window.opener.closed){{"
-            "window.opener.location.href='{url}';"
-            "setTimeout(function(){{window.location.href=window.location.href;}},400);"
-            "}}else{{window.open('{url}','_blank');}};"
-            "}}catch(e){{window.open('{url}','_blank');}}"
+            "window.opener.location.href='" + safe_url + "';"
+            "var _base=window.location.origin+window.location.pathname;"
+            "setTimeout(function(){{window.location.href=_base+'?url='+_eu+'&pn='+_pno+'&pname='+_pname;}},300);"
+            "}}else{{window.open('" + safe_url + "','_blank');}}"
+            "}}catch(e){{window.open('" + safe_url + "','_blank');}}"
             "return false;"
-        ).format(url=url)
-        return '<a href="{url}" onclick="{onclick}" style="color:#0f6a63;text-decoration:none;font-weight:700;">{text}</a>'.format(
-            url=url, onclick=onclick, text=html.escape(text))
+        )
+        return '<a href="{u}" onclick="{oc}" style="color:#0f6a63;text-decoration:none;font-weight:700;">{t}</a>'.format(
+            u=url, oc=onclick, t=html.escape(text))
     _content_with_links = _re.sub(r'\[([^\]]+)\]\(([^)]+)\)', _replace_link, _content)
     safe_text = html.escape(_content_with_links, quote=False).replace("\n", "<br>")
     # html.escape로 인해 a 태그가 깨지는 걸 방지 → a 태그는 이미 처리했으므로 &lt;a 를 복원
