@@ -923,6 +923,18 @@ def infer_target_category_from_query(user_text: str, current_product: Dict) -> s
     # 코디 세트 요청 ("코디할 아이템", "전체 코디", "코디 추천") → 아우터 우선
     if any(k in q for k in ["코디할 아이템", "전체 코디", "세트 코디", "코디 세트", "코디 추천"]):
         return "코디세트"
+    # ★ "아니" + 추천 요청 → 이전 추천 카테고리 유지
+    if any(q.startswith(k) for k in ["아니", "아니요", "아니그럼", "아니근데"]):
+        prev_recos = st.session_state.get("last_recommendations") or []
+        if prev_recos:
+            prev_sub = clean_text(prev_recos[0].get("sub_category",""))
+            sub_to_cat = {"티셔츠":"티셔츠","셔츠":"셔츠","블라우스":"블라우스","니트":"니트",
+                          "가디건":"가디건","자켓":"자켓","점퍼":"점퍼","슬랙스":"팬츠",
+                          "데님":"팬츠","팬츠":"팬츠","스커트":"스커트","원피스":"원피스"}
+            prev_cat = sub_to_cat.get(prev_sub,"")
+            if prev_cat:
+                return prev_cat
+
     # ★ "비슷한 스타일", "입을 수 있는 상품", "같은 종류" → 현재 상품과 동일 카테고리
     same_cat_kws = ["비슷한스타일", "비슷한상품", "비슷한옷", "비슷한거", "비슷한티",
                     "입을수있는상품", "같은종류", "같은카테고리", "이런스타일",
@@ -1284,39 +1296,57 @@ def recommend_products_for_query(
         elif target_category == "맨투맨":
             if not any(k in row_name for k in ["맨투맨", "후드", "스웨트"]):
                 continue
-            if top_rank and ranks and top_rank not in ranks:
-                continue
-            score += 15
+            if top_rank and ranks:
+                max_r = max(ranks)
+                if top_rank > max_r + 1: continue
+                score += 8 if top_rank == max_r + 1 else 15
+            else:
+                score += 15
         elif target_category == "블라우스":
             if not (sub == "블라우스" or "블라우스" in row_name):
                 continue
-            if top_rank and ranks and top_rank not in ranks:
-                continue
-            score += 15
+            if top_rank and ranks:
+                max_r = max(ranks)
+                if top_rank > max_r + 1: continue
+                score += 8 if top_rank == max_r + 1 else 15
+            else:
+                score += 15
         elif target_category == "셔츠":
             if not (sub == "셔츠" or "셔츠" in row_name):
                 continue
-            if top_rank and ranks and top_rank not in ranks:
-                continue
-            score += 15
+            if top_rank and ranks:
+                max_r = max(ranks)
+                if top_rank > max_r + 1: continue
+                score += 8 if top_rank == max_r + 1 else 15
+            else:
+                score += 15
         elif target_category == "가디건":
             if not (sub == "가디건" or "가디건" in row_name):
                 continue
-            if top_rank and ranks and top_rank not in ranks:
-                continue
-            score += 15
+            if top_rank and ranks:
+                max_r = max(ranks)
+                if top_rank > max_r + 1: continue
+                score += 8 if top_rank == max_r + 1 else 15
+            else:
+                score += 15
         elif target_category == "니트":
             if not (sub == "니트" or "니트" in row_name):
                 continue
-            if top_rank and ranks and top_rank not in ranks:
-                continue
-            score += 15
+            if top_rank and ranks:
+                max_r = max(ranks)
+                if top_rank > max_r + 1: continue
+                score += 8 if top_rank == max_r + 1 else 15
+            else:
+                score += 15
         elif target_category == "티셔츠":
             if not (sub == "티셔츠" or cat == "티셔츠"):
                 continue
-            if top_rank and ranks and top_rank not in ranks:
-                continue
-            score += 15
+            if top_rank and ranks:
+                max_r = max(ranks)
+                if top_rank > max_r + 1: continue
+                score += 8 if top_rank == max_r + 1 else 15
+            else:
+                score += 15
         elif target_category == "원피스":
             if not ("원피스" in sub or "원피스" in cat):
                 continue
@@ -1434,6 +1464,13 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
     current_product = current_product_dict(product_context, db_product)
     body_ctx = build_body_context()
     target_category = infer_target_category_from_query(user_text, current_product)
+    # ★ "77이라도", "77사이즈라도" → 해당 사이즈로 임시 override
+    _qr = user_text.replace(" ","")
+    _size_override = detect_size_from_text(user_text)
+    if _size_override and any(k in _qr for k in ["이라도","이라면","사이즈라도","사이즈면"]):
+        body_ctx = dict(body_ctx)
+        body_ctx["top_size"] = _size_override
+        body_ctx["bottom_size"] = _size_override
     is_re_request = any(k in user_text for k in ["다른", "또 다른", "더 없어", "다른 거"])
     prev_recos = st.session_state.get("last_recommendations") or []
     already = {r["product_name"] for r in prev_recos}
