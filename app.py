@@ -618,6 +618,9 @@ def is_recommendation_question(user_text: str) -> bool:
     # ── 명시적 추천/코디 키워드
     reco_kws = [
         "추천해줘", "추천해주세요", "추천좀", "추천부탁", "추천해봐", "추천좀해줘",
+        "추천해줄", "추천해줄수있어", "추천해줄수있나",
+        "추천해달라", "추천해달래", "달라구", "달라고해",
+        "줄수있어", "줄수있나", "줘봐", "줘봐요",
         "골라줘", "골라줘요", "골라주세요", "골라봐줘", "골라봐",
         "어울리는", "어울릴", "어울려", "어울리게",
         "같이입", "같이입을", "함께입", "세트로",
@@ -688,6 +691,17 @@ def is_recommendation_question(user_text: str) -> bool:
     ]
     for pat in situation_patterns:
         if re.search(pat, user_text): return True
+
+    # 상의/하의 + 추천 / 내 사이즈에 맞는 추천 구어체 패턴
+    import re as _re2
+    extra_patterns = [
+        r"(상의|윗옷|탑|하의|아랫옷).{0,20}(추천|골라|없어|있어|줄수있|달라|줘|찾아)",
+        r"내\s*사이즈.{0,20}(맞는|되는|가능한).{0,20}(추천|골라|줘|달라|줄수있)",
+        r"(나한테|내가|제가).{0,15}맞는.{0,15}(추천|골라|줘|달라|찾아줘)",
+    ]
+    for pat in extra_patterns:
+        if _re2.search(pat, user_text):
+            return True
 
     return False
 def get_fast_policy_answer(user_text: str) -> Optional[str]:
@@ -893,6 +907,19 @@ def infer_target_category_from_query(user_text: str, current_product: Dict) -> s
     ]:
         if any(k in q for k in kw):
             return cat
+
+    # ★ "상의" 키워드 → 현재 상품과 같은 상의 카테고리 반환
+    if any(k in q for k in ["상의", "상체옷", "윗옷", "탑"]):
+        sub = current_product.get("sub_category", "")
+        top_cats = {"티셔츠":"티셔츠", "셔츠":"셔츠", "블라우스":"블라우스",
+                    "니트":"니트", "가디건":"가디건", "맨투맨":"맨투맨"}
+        return top_cats.get(sub, "티셔츠")  # 현재 상품 카테고리, 없으면 티셔츠
+
+    # ★ "하의" 키워드
+    if any(k in q for k in ["하의", "하체옷", "아랫옷"]):
+        sub = current_product.get("sub_category", "")
+        bot_cats = {"슬랙스":"팬츠", "데님":"팬츠", "팬츠":"팬츠", "스커트":"스커트"}
+        return bot_cats.get(sub, "팬츠")
     # 코디 세트 요청 ("코디할 아이템", "전체 코디", "코디 추천") → 아우터 우선
     if any(k in q for k in ["코디할 아이템", "전체 코디", "세트 코디", "코디 세트", "코디 추천"]):
         return "코디세트"
@@ -1920,16 +1947,20 @@ def llm_can_help(user_text: str) -> bool:
 
 
 def safe_llm_fallback(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
+    # ★ 추천 요청인데 결과가 없는 경우 → 사이즈 답변으로 fallback 금지
+    _is_reco = is_recommendation_question(user_text)
     for builder in [
         lambda: build_name_answer(product_context, db_product) if is_name_question(user_text) else None,
         lambda: get_fast_policy_answer(user_text),
-        lambda: build_size_answer(user_text, product_context, db_product),
+        lambda: None if _is_reco else build_size_answer(user_text, product_context, db_product),
         lambda: build_recommendation_answer(user_text, product_context, db_product),
         lambda: build_color_answer(product_context, db_product) if is_color_question(user_text) else None,
     ]:
         ans = builder()
         if ans:
             return ans
+    if _is_reco:
+        return "지금 딱 맞는 상품을 찾기 어렵네요. 원하시는 카테고리나 스타일을 조금 더 구체적으로 말씀해주시면 다시 찾아볼게요 :)"
     return "지금 잠깐 답변이 늦어지고 있어요. 같은 내용을 한 번만 다시 보내주시면 바로 이어서 도와드릴게요 :)"
 
 
