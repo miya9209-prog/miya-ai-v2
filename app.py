@@ -884,14 +884,35 @@ def row_blob(rowd: Dict) -> str:
 
 def infer_target_category_from_query(user_text: str, current_product: Dict) -> str:
     q = clean_text(user_text)
-    # "점퍼나 자켓", "자켓이나 아우터" 같은 복수 표현 → 아우터(자켓+점퍼 통합)로 처리
-    if any(k in q for k in ["아우터"]):
-        return "아우터"
-    # 자켓+점퍼 함께 언급 → 아우터
+    # ★ "어울리는 X 추천" 패턴 — for loop보다 먼저 처리
+    # "이 바지랑 어울리는 티 추천해줘" → 티셔츠 추천
+    import re as _re_infer
+    _co_map_sorted = [
+        ("티셔츠","티셔츠"),("반팔티","티셔츠"),("긴팔티","티셔츠"),("나시티","티셔츠"),("긴티","티셔츠"),
+        ("바지","팬츠"),("팬츠","팬츠"),("슬랙스","팬츠"),("데님","팬츠"),("청바지","팬츠"),
+        ("자켓","자켓"),("재킷","자켓"),("아우터","아우터"),("점퍼","점퍼"),("야상","점퍼"),
+        ("블라우스","블라우스"),("셔츠","셔츠"),("가디건","가디건"),("니트","니트"),
+        ("스커트","스커트"),("치마","스커트"),("원피스","원피스"),("맨투맨","맨투맨"),("후드","맨투맨"),
+        ("반팔","티셔츠"),("긴팔","티셔츠"),
+        ("티","티셔츠"),  # 단독 "티"는 마지막
+    ]
+    _has_coord = any(k in q for k in ["코디","매치","같이입","함께입","세트"])
+    if not _has_coord:  # 코디 의도면 반대편 카테고리가 맞으므로 건너뜀
+        for _cp in [r"어울리는(.{1,8})(추천|있어|보여|골라|줘)", r"어울릴(.{1,8})(추천|있어|보여|골라|줘)"]:
+            _cm = _re_infer.search(_cp, q)
+            if _cm:
+                _cf = _cm.group(1)
+                for _ck, _cv in _co_map_sorted:
+                    if _ck in _cf:
+                        return _cv
+
+    # 아우터 (복수 표현 통합)
+    if any(k in q for k in ["아우터"]): return "아우터"
     has_jacket = any(k in q for k in ["자켓", "재킷"])
     has_jumper = any(k in q for k in ["점퍼", "야상"])
-    if has_jacket and has_jumper:
-        return "아우터"
+    if has_jacket and has_jumper: return "아우터"
+
+    # 명시적 카테고리 키워드
     for kw, cat in [
         (["바지", "슬랙스", "팬츠", "데님", "청바지"], "팬츠"),
         (["스커트", "치마"], "스커트"),
@@ -899,63 +920,52 @@ def infer_target_category_from_query(user_text: str, current_product: Dict) -> s
         (["점퍼", "야상"], "점퍼"),
         (["맨투맨", "후드", "스웨트"], "맨투맨"),
         (["블라우스"], "블라우스"),
-        (["티셔츠", "반팔티", "반소매티", "기본티"], "티셔츠"),  # ★ 셔츠보다 먼저
+        (["티셔츠", "반팔티", "반소매티", "기본티", "반팔", "긴팔티", "긴티", "나시티"], "티셔츠"),
         (["셔츠"], "셔츠"),
         (["가디건"], "가디건"),
         (["니트"], "니트"),
         (["원피스"], "원피스"),
     ]:
-        if any(k in q for k in kw):
-            return cat
+        if any(k in q for k in kw): return cat
 
-    # ★ "상의" 키워드 → 현재 상품과 같은 상의 카테고리 반환
+    # ★ "상의/하의" 키워드
     if any(k in q for k in ["상의", "상체옷", "윗옷", "탑"]):
-        sub = current_product.get("sub_category", "")
-        top_cats = {"티셔츠":"티셔츠", "셔츠":"셔츠", "블라우스":"블라우스",
-                    "니트":"니트", "가디건":"가디건", "맨투맨":"맨투맨"}
-        return top_cats.get(sub, "티셔츠")  # 현재 상품 카테고리, 없으면 티셔츠
-
-    # ★ "하의" 키워드
+        sub = clean_text(current_product.get("sub_category", ""))
+        return {"티셔츠":"티셔츠","셔츠":"셔츠","블라우스":"블라우스","니트":"니트","가디건":"가디건","맨투맨":"맨투맨"}.get(sub,"티셔츠")
     if any(k in q for k in ["하의", "하체옷", "아랫옷"]):
-        sub = current_product.get("sub_category", "")
-        bot_cats = {"슬랙스":"팬츠", "데님":"팬츠", "팬츠":"팬츠", "스커트":"스커트"}
-        return bot_cats.get(sub, "팬츠")
-    # 코디 세트 요청 ("코디할 아이템", "전체 코디", "코디 추천") → 아우터 우선
-    if any(k in q for k in ["코디할 아이템", "전체 코디", "세트 코디", "코디 세트", "코디 추천"]):
-        return "코디세트"
-    # ★ "아니" + 추천 요청 → 이전 추천 카테고리 유지
+        sub = clean_text(current_product.get("sub_category", ""))
+        return {"슬랙스":"팬츠","데님":"팬츠","팬츠":"팬츠","스커트":"스커트"}.get(sub,"팬츠")
+
+    # ★ "티" 단독 — 코디 의도가 아닌 경우 티셔츠로
+    q_raw = user_text.replace(" ","")
+    _is_coord = any(k in q_raw for k in ["코디","매치","같이입","함께입","세트"])
+    if "티" in q_raw and not _is_coord:
+        sub = clean_text(current_product.get("sub_category",""))
+        return sub if sub in {"티셔츠","셔츠","블라우스"} else "티셔츠"
+
+    # ★ "아니" → 이전 추천 카테고리 유지
     if any(q.startswith(k) for k in ["아니", "아니요", "아니그럼", "아니근데"]):
         prev_recos = st.session_state.get("last_recommendations") or []
         if prev_recos:
             prev_sub = clean_text(prev_recos[0].get("sub_category",""))
-            sub_to_cat = {"티셔츠":"티셔츠","셔츠":"셔츠","블라우스":"블라우스","니트":"니트",
-                          "가디건":"가디건","자켓":"자켓","점퍼":"점퍼","슬랙스":"팬츠",
-                          "데님":"팬츠","팬츠":"팬츠","스커트":"스커트","원피스":"원피스"}
-            prev_cat = sub_to_cat.get(prev_sub,"")
-            if prev_cat:
-                return prev_cat
+            _sub2cat = {"티셔츠":"티셔츠","셔츠":"셔츠","블라우스":"블라우스","니트":"니트",
+                        "가디건":"가디건","자켓":"자켓","점퍼":"점퍼","슬랙스":"팬츠",
+                        "데님":"팬츠","팬츠":"팬츠","스커트":"스커트","원피스":"원피스"}
+            prev_cat = _sub2cat.get(prev_sub,"")
+            if prev_cat: return prev_cat
 
-    # ★ "비슷한 스타일", "입을 수 있는 상품", "같은 종류" → 현재 상품과 동일 카테고리
-    same_cat_kws = ["비슷한스타일", "비슷한상품", "비슷한옷", "비슷한거", "비슷한티",
-                    "입을수있는상품", "같은종류", "같은카테고리", "이런스타일",
-                    "이런비슷한", "같은느낌", "이런류"]
-    current_sub = clean_text(current_product.get("sub_category", ""))
-    current_cat = clean_text(current_product.get("category", ""))
+    # ★ "비슷한" → 현재 상품과 동일 카테고리
+    same_cat_kws = ["비슷한스타일","비슷한상품","비슷한옷","비슷한거","비슷한티",
+                    "입을수있는상품","같은종류","같은카테고리","이런스타일","이런비슷한","같은느낌","이런류"]
+    current_sub = clean_text(current_product.get("sub_category",""))
     if any(k in q for k in same_cat_kws):
-        # 현재 상품 카테고리와 같은 카테고리 반환
-        sub_to_cat = {
-            "티셔츠": "티셔츠", "맨투맨": "맨투맨", "셔츠": "셔츠",
-            "블라우스": "블라우스", "니트": "니트", "가디건": "가디건",
-            "자켓": "자켓", "점퍼": "점퍼",
-            "슬랙스": "팬츠", "데님": "팬츠", "팬츠": "팬츠",
-            "스커트": "스커트", "원피스": "원피스",
-        }
-        return sub_to_cat.get(current_sub, "")
-    # 현재 상품 기준으로 반대편 추천 (어울리는 것)
-    if current_sub in BOTTOM_SUB_CATS:
-        return "블라우스"
-    if current_cat in TOP_MAIN_CATS or current_sub in TOP_SUB_CATS:
-        return "팬츠"
+        _sub2cat2 = {"티셔츠":"티셔츠","셔츠":"셔츠","블라우스":"블라우스","니트":"니트",
+                     "가디건":"가디건","자켓":"자켓","점퍼":"점퍼","슬랙스":"팬츠","데님":"팬츠","팬츠":"팬츠"}
+        return _sub2cat2.get(current_sub,"")
+
+    # ★ 기본: 현재 상품의 반대편
+    if current_sub in {"데님","슬랙스","팬츠","스커트"}: return "블라우스"
+    if current_sub in {"셔츠","블라우스","니트","가디건","자켓","점퍼","티셔츠"}: return "팬츠"
     return ""
 
 
