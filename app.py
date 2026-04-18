@@ -5,6 +5,7 @@ import html
 import time
 import logging
 from datetime import datetime
+import difflib
 from typing import Optional, Dict, List, Tuple, Any
 from urllib.parse import urlparse, parse_qs
 from pathlib import Path
@@ -324,6 +325,149 @@ def build_review_note(product_no_value: str) -> str:
 def build_model_note() -> str:
     txt = get_model_reference_text()
     return ("상세페이지 모델컷은 {} 기준 느낌이라 고객님 체형에서는 같은 핏감으로 보이지 않을 수 있어요.".format(txt)) if txt else ""
+
+_COMPARE_STOPWORDS = {"이", "이거", "이옷", "이바지", "이팬츠", "지금", "보고있는", "보는", "상품", "랑", "이랑", "과", "와", "하고", "비교", "해주세요", "해줘", "좀", "한번", "뭐가", "더", "어느", "게", "쪽", "바지", "팬츠", "슬랙스", "데님", "청바지", "옷"}
+
+def normalize_name_for_match(s: str) -> str:
+    s = clean_text(s).lower()
+    s = re.sub(r'\([^)]*\)', ' ', s)
+    s = re.sub(r'\[[^\]]*\]', ' ', s)
+    s = re.sub(r'\d+color|\d+컬러|free|f\.?\s*', ' ', s)
+    s = s.replace('/', ' ').replace('_', ' ')
+    s = re.sub(r'[^0-9a-z가-힣 ]+', ' ', s)
+    s = re.sub(r'\s+', ' ', s).strip()
+    return s
+
+def tokenize_name_for_match(s: str) -> List[str]:
+    toks = [t for t in normalize_name_for_match(s).split() if len(t) >= 2 and t not in _COMPARE_STOPWORDS]
+    return toks
+
+def extract_compare_target_phrase(user_text: str) -> str:
+    q = clean_text(user_text)
+    patterns = [
+        r'이\s*(?:바지|팬츠|옷|상품|거)?\s*(?:랑|이랑|과|와)\s*(.+?)\s*(?:비교|중)',
+        r'(.+?)\s*(?:랑|이랑|과|와)\s*비교',
+        r'(.+?)\s*(?:이|가)?\s*더\s*(?:나아|괜찮)',
+    ]
+    for p in patterns:
+        m = re.search(p, q)
+        if m:
+            phrase = clean_text(m.group(1))
+            phrase = re.sub(r'^(이|그|저)\s*(바지|팬츠|옷|상품)\s*', '', phrase).strip()
+            return phrase
+    return ''
+
+def score_product_match(query_phrase: str, rowd: Dict) -> float:
+    qn = normalize_name_for_match(query_phrase)
+    name = clean_text(rowd.get('product_name', ''))
+    nn = normalize_name_for_match(name)
+    if not qn or not nn:
+        return 0.0
+    qt = tokenize_name_for_match(query_phrase)
+    nt = tokenize_name_for_match(name)
+    score = 0.0
+    if qn == nn:
+        score += 120
+    if qn in nn:
+        score += 80
+    if nn in qn:
+        score += 40
+    overlap = len(set(qt) & set(nt))
+    score += overlap * 18
+    for t in qt:
+        if any(n.startswith(t) or t.startswith(n) for n in nt):
+            score += 6
+    # category cue bonus
+    q_has_pants = any(k in qn for k in ['슬랙스','팬츠','바지','데님','청바지'])
+    q_has_top = any(k in qn for k in ['니트','가디건','셔츠','블라우스','맨투맨','티셔츠'])
+    sub = clean_text(rowd.get('sub_category',''))
+    if q_has_pants and sub in {'슬랙스','데님','팬츠'}:
+        score += 10
+    if q_has_top and sub in {'니트','가디건','셔츠','블라우스','맨투맨','티셔츠'}:
+        score += 10
+    score += difflib.SequenceMatcher(None, qn, nn).ratio() * 30
+    return score
+
+def find_product_candidates_from_phrase(query_phrase: str, current_product_no: str = '', limit: int = 3) -> List[Dict]:
+    if DB.empty or not query_phrase:
+        return []
+    rows = []
+    for _, row in DB.iterrows():
+        pno = normalize_product_no(row.get('product_no', ''))
+        if current_product_no and pno == current_product_no:
+            continue
+        rowd = row.to_dict()
+        sc = score_product_match(query_phrase, rowd)
+        if sc > 20:
+            rowd['_match_score'] = sc
+            rows.append(rowd)
+    rows.sort(key=lambda r: r.get('_match_score', 0), reverse=True)
+    return rows[:limit]
+
+def product_row_to_context(rowd: Dict) -> Dict:
+    return {
+        'product_name': clean_text(rowd.get('product_name','')),
+        'category': clean_text(rowd.get('sub_category','')) or clean_text(rowd.get('category','')),
+        'size_tip': clean_text(rowd.get('size_range','')),
+        'fit': clean_text(rowd.get('fit_type','')),
+        'summary': clean_text(rowd.get('product_summary','')),
+        'sub_category': clean_text(rowd.get('sub_category','')),
+        'product_no': clean_text(rowd.get('product_no','')),
+    }
+
+def _comparison_pick_text(a_name: str, b_name: str, a_eval: Dict, b_eval: Dict, situation: str = '') -> str:
+    def _score(ev):
+        return 2 if ev.get('supported') is True else 1 if ev.get('supported') == 'edge' else 0
+    sa, sb = _score(a_eval), _score(b_eval)
+    pick_a = sa >= sb
+    pick_name = a_name if pick_a else b_name
+    other_name = b_name if pick_a else a_name
+    pick_eval = a_eval if pick_a else b_eval
+    other_eval = b_eval if pick_a else a_eval
+    parts = [f"두 상품 다 보실 수는 있는데, 고객님 기준으로는 {pick_name} 쪽이 더 안정적이에요."]
+    parts.append(f"{pick_name}은 {pick_eval.get('reason','무리 없는 쪽이에요.')}")
+    parts.append(f"반면 {other_name}은 {other_eval.get('reason','조금 더 확인이 필요해요.')}")
+    if situation in ['학교','출근','면접','상견례']:
+        parts.append(f"지금처럼 {situation} 상황이면 조금 더 단정하게 정리되는 {pick_name} 쪽을 먼저 추천드리고 싶어요.")
+    else:
+        parts.append(f"그래서 지금 목적이면 저는 {pick_name}을 더 추천드려요.")
+    return ' '.join(parts)
+
+def build_db_product_comparison_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
+    q = clean_text(user_text)
+    q_no_space = q.replace(' ', '')
+    if not any(k in q_no_space for k in ['비교','둘중','뭐가더','어느게','어느쪽','더나아','더괜찮']):
+        return None
+    current = current_product_dict(product_context, db_product)
+    phrase = extract_compare_target_phrase(q)
+    if not phrase:
+        return None
+    candidates = find_product_candidates_from_phrase(phrase, current.get('product_no',''))
+    if not candidates:
+        return None
+    if len(candidates) >= 2 and candidates[0].get('_match_score',0) - candidates[1].get('_match_score',0) < 12:
+        c1, c2 = candidates[0], candidates[1]
+        return f"말씀하신 상품이 {clean_text(c1.get('product_name',''))}인지, {clean_text(c2.get('product_name',''))}인지 한 번만 확인해주시면 바로 비교해드릴게요 :)"
+    other = candidates[0]
+    body = build_body_context()
+    user_size = clean_text(body.get('top_size','')) or clean_text(body.get('bottom_size',''))
+    a_ctx = {
+        'product_name': current.get('product_name',''),
+        'category': current.get('sub_category','') or current.get('category',''),
+        'size_tip': current.get('size_range',''),
+        'fit': clean_text((db_product or {}).get('fit_type','')),
+        'summary': clean_text((db_product or {}).get('product_summary','')),
+    }
+    b_ctx = product_row_to_context(other)
+    if user_size:
+        a_eval = evaluate_size_support(user_size, a_ctx, db_product or current)
+        b_eval = evaluate_size_support(user_size, b_ctx, other)
+    else:
+        a_eval = {'supported': None, 'reason': '실측까지 같이 보면 더 정확해요.'}
+        b_eval = {'supported': None, 'reason': '실측까지 같이 보면 더 정확해요.'}
+    sit = st.session_state.get('pending_situation','')
+    answer = _comparison_pick_text(current.get('product_name','지금 보시는 상품'), clean_text(other.get('product_name','')), a_eval, b_eval, sit)
+    return answer
 
 def build_comparison_answer(user_text: str) -> Optional[str]:
     q = clean_text(user_text).replace(" ", "")
@@ -2245,7 +2389,8 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
     )
 
     try:
-        # ★ 우선순위: 추천 질문은 반드시 사이즈 판단보다 먼저 처리
+        compare_ans = build_comparison_answer(user_text) or build_db_product_comparison_answer(user_text, product_context, db_product)
+        # ★ 우선순위: 비교/추천 질문은 반드시 사이즈 판단보다 먼저 처리
         followup_ans = build_followup_recommendation_answer(user_text)
         # ★ 컬러매치/체형코디는 추천보다 먼저 처리 (코디 관련 키워드 충돌 방지)
         color_match_ans = build_color_match_answer(user_text, product_context, db_product)
@@ -2259,7 +2404,7 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
         size_ans = build_size_answer(user_text, product_context, db_product)
         color_ans = build_color_answer(product_context, db_product) if is_color_question(user_text) else None
 
-        direct_answers = [followup_ans, color_match_ans, body_style_ans, reco_ans, name_ans, policy_ans, size_ans, color_ans]
+        direct_answers = [compare_ans, followup_ans, color_match_ans, body_style_ans, reco_ans, name_ans, policy_ans, size_ans, color_ans]
         answer = next((a for a in direct_answers if a), None)
 
         used_llm = False
