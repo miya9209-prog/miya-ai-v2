@@ -5,8 +5,9 @@ import html
 import time
 import logging
 from datetime import datetime
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Any
 from urllib.parse import urlparse, parse_qs
+from pathlib import Path
 
 import pandas as pd
 import requests
@@ -197,6 +198,11 @@ def ensure_state() -> None:
         "last_answer": "", "last_recommendations": [],
         "session_id": _new_session_id(),  # 관리프로그램 연동용 세션 ID
         "last_mentioned_reco_idx": None,  # 마지막으로 명시 언급된 추천 번호
+        "pending_target_category": "",
+        "pending_situation": "",
+        "pending_style": "",
+        "active_product_override": {},
+        "shoe_size": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -224,6 +230,143 @@ def load_product_db() -> pd.DataFrame:
 
 
 DB = load_product_db()
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_review_summary() -> Dict[str, Dict[str, Any]]:
+    path = "review_summary.json"
+    if not os.path.exists(path):
+        return {}
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_model_profiles() -> Dict[str, Any]:
+    path = "model_profiles.json"
+    if not os.path.exists(path):
+        return {"primary_models": []}
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except Exception:
+        return {"primary_models": []}
+
+REVIEW_SUMMARY = load_review_summary()
+MODEL_PROFILES = load_model_profiles()
+
+def get_review_summary(product_no_value: str) -> Optional[Dict[str, Any]]:
+    if not product_no_value:
+        return None
+    return REVIEW_SUMMARY.get(normalize_product_no(product_no_value))
+
+def get_model_reference_text() -> str:
+    models = MODEL_PROFILES.get("primary_models", [])
+    bits = []
+    for m in models[:2]:
+        bits.append(f"{m.get('height_cm','')}cm/{m.get('weight_kg','')}kg 체형")
+    return ", ".join(bits)
+
+def detect_shoe_size_from_text(user_text: str) -> Optional[str]:
+    q = clean_text(user_text)
+    m = re.search(r'(?<!\d)(2[2-9]0|30[0-5])(?!\d)', q)
+    return m.group(1) if m else None
+
+def is_affirmative_short(user_text: str) -> bool:
+    q = clean_text(user_text).replace(" ", "")
+    return q in {"응","네","넵","좋아","그래","ㅇㅇ","예","좋아요","그래요"}
+
+def update_conversation_hints(user_text: str) -> None:
+    sits = detect_situation_from_text(user_text)
+    if sits:
+        st.session_state.pending_situation = sits[0]
+    style = detect_style_from_text(user_text)
+    if style:
+        st.session_state.pending_style = style
+    tgt = infer_target_category_from_query(user_text, current_product_dict(product_context if 'product_context' in globals() else {}, None) if False else {"product_name":"","category":"","sub_category":""})
+    if tgt:
+        st.session_state.pending_target_category = tgt
+    shoe_size = detect_shoe_size_from_text(user_text)
+    if shoe_size:
+        st.session_state.shoe_size = shoe_size
+
+def get_active_product_context(product_context: Dict, db_product: Optional[Dict]) -> Tuple[Dict, Optional[Dict]]:
+    override = st.session_state.get("active_product_override") or {}
+    if override:
+        db_like = dict(override)
+        ctx = dict(product_context)
+        ctx["product_name"] = clean_text(override.get("product_name", "")) or ctx.get("product_name", "지금 보시는 상품")
+        ctx["category"] = clean_text(override.get("category", "")) or ctx.get("category", "기타")
+        ctx["sub_category"] = clean_text(override.get("sub_category", "")) or ctx.get("sub_category", "")
+        ctx["size_tip"] = clean_text(override.get("size_range", "")) or ctx.get("size_tip", "")
+        return ctx, db_like
+    return product_context, db_product
+
+def activate_recommendation_as_base(reco: Dict) -> None:
+    row = (reco or {}).get("_full_row") or reco or {}
+    st.session_state.active_product_override = row
+
+def build_review_note(product_no_value: str) -> str:
+    rs = get_review_summary(product_no_value)
+    if not rs:
+        return ""
+    parts = []
+    fit = rs.get("fit_signals") or []
+    body = rs.get("body_signals") or []
+    occ = rs.get("occasion_signals") or []
+    if fit:
+        parts.append("후기에서는 {} 쪽 반응이 있었어요".format("·".join(fit[:2])))
+    if body:
+        parts.append("체형 관련으로는 {} 언급이 있었고요".format("·".join(body[:2])))
+    if occ:
+        parts.append("{} 용도로 입었다는 후기도 보였어요".format("·".join(occ[:2])))
+    return " ".join(parts[:2])
+
+def build_model_note() -> str:
+    txt = get_model_reference_text()
+    return ("상세페이지 모델컷은 {} 기준 느낌이라 고객님 체형에서는 같은 핏감으로 보이지 않을 수 있어요.".format(txt)) if txt else ""
+
+def build_comparison_answer(user_text: str) -> Optional[str]:
+    q = clean_text(user_text).replace(" ", "")
+    if not any(k in q for k in ["둘중","뭐가더","어느게","어느쪽","더나아","더괜찮"]):
+        return None
+    recos = st.session_state.get("last_recommendations") or []
+    if len(recos) < 2:
+        return None
+    refs = []
+    for idx, words in {0:["1번","첫번째"],1:["2번","두번째"],2:["3번","세번째"]}.items():
+        if any(w in q for w in words):
+            refs.append(idx)
+    if len(refs) < 2:
+        refs = [0,1]
+    a = recos[refs[0]]; b = recos[refs[1]]
+    a_ctx = {"product_name":clean_text(a.get("product_name","")),"category":clean_text(a.get("sub_category","")),"size_tip":clean_text(a.get("size_range","")),"fit":clean_text((a.get("_full_row") or {}).get("fit_type","")),"summary":clean_text((a.get("_full_row") or {}).get("product_summary",""))}
+    b_ctx = {"product_name":clean_text(b.get("product_name","")),"category":clean_text(b.get("sub_category","")),"size_tip":clean_text(b.get("size_range","")),"fit":clean_text((b.get("_full_row") or {}).get("fit_type","")),"summary":clean_text((b.get("_full_row") or {}).get("product_summary",""))}
+    body = build_body_context()
+    top = clean_text(body.get("top_size","")) or clean_text(body.get("bottom_size",""))
+    ae = evaluate_size_support(top, a_ctx, a.get("_full_row") or a) if top else {"supported":None,"reason":""}
+    be = evaluate_size_support(top, b_ctx, b.get("_full_row") or b) if top else {"supported":None,"reason":""}
+    sit = st.session_state.get("pending_situation", "")
+    score_a = (2 if ae.get("supported") is True else 1 if ae.get("supported")=="edge" else 0)
+    score_b = (2 if be.get("supported") is True else 1 if be.get("supported")=="edge" else 0)
+    if sit in ["학교","출근"]:
+        for score, rec in [(score_a,a),(score_b,b)]:
+            blob = row_blob((rec.get('_full_row') or rec))
+    pick = a if score_a >= score_b else b
+    other = b if pick is a else a
+    return f"두 상품 다 보실 수는 있는데, 고객님 기준으로는 {clean_text(pick.get('product_name',''))} 쪽이 더 안정적이에요. {clean_text(pick.get('product_name',''))}은 {evaluate_size_support(top, {'product_name':clean_text(pick.get('product_name','')),'category':clean_text(pick.get('sub_category','')),'size_tip':clean_text(pick.get('size_range','')),'fit':clean_text((pick.get('_full_row') or {}).get('fit_type',''))}, pick.get('_full_row') or pick).get('reason','무리 없는 쪽이에요.')} 반면 {clean_text(other.get('product_name',''))}은 {evaluate_size_support(top, {'product_name':clean_text(other.get('product_name','')),'category':clean_text(other.get('sub_category','')),'size_tip':clean_text(other.get('size_range','')),'fit':clean_text((other.get('_full_row') or {}).get('fit_type',''))}, other.get('_full_row') or other).get('reason','조금 더 확인이 필요해요.')} 그래서 지금 목적이면 저는 {clean_text(pick.get('product_name',''))}을 더 추천드려요."
+
+def continue_from_previous_flow() -> Optional[str]:
+    target = st.session_state.get("pending_target_category", "")
+    situation = st.session_state.get("pending_situation", "")
+    style = st.session_state.get("pending_style", "")
+    if target or situation or style:
+        bits = []
+        if situation: bits.append(situation)
+        if style: bits.append(style)
+        if target: bits.append(target)
+        req = " ".join(bits) + " 추천해줘"
+        return req
+    return None
 
 
 def get_db_product(product_no_value: str) -> Optional[Dict]:
@@ -1169,6 +1312,7 @@ def build_color_answer(product_context: Dict, db_product: Optional[Dict]) -> Opt
 def build_size_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
     if not is_size_question(user_text):
         return None
+    product_context, db_product = get_active_product_context(product_context, db_product)
     body = build_body_context()
     body_hints = extract_user_body_from_text(user_text)
     size_cat = get_product_size_category(db_product, product_context)
@@ -1225,6 +1369,8 @@ def recommend_products_for_query(
         return []
     if not target_category:
         target_category = infer_target_category_from_query(user_text, current_product)
+    if not target_category and st.session_state.get("pending_target_category"):
+        target_category = st.session_state.get("pending_target_category")
     current_no = normalize_product_no(current_product.get("product_no", ""))
     top_rank = size_rank(body_ctx.get("top_size", ""))
     bottom_rank = size_rank(body_ctx.get("bottom_size", ""))
@@ -1469,11 +1615,14 @@ def _db_size_availability(target_category: str, user_top: str, current_no: str) 
     return {"exact": exact, "boundary": boundary, "none": len(exact) == 0 and len(boundary) == 0}
 
 def build_recommendation_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
+    product_context, db_product = get_active_product_context(product_context, db_product)
     if not is_recommendation_question(user_text):
         return None
     current_product = current_product_dict(product_context, db_product)
     body_ctx = build_body_context()
     target_category = infer_target_category_from_query(user_text, current_product)
+    if not target_category and st.session_state.get("pending_target_category"):
+        target_category = st.session_state.get("pending_target_category")
     # ★ "77이라도", "77사이즈라도" → 해당 사이즈로 임시 override
     _qr = user_text.replace(" ","")
     _size_override = detect_size_from_text(user_text)
@@ -1509,6 +1658,8 @@ def build_recommendation_answer(user_text: str, product_context: Dict, db_produc
                 size_note = " (고객님 {} 기준 경계 사이즈 상품도 함께 봐드릴 수 있어요.)".format(top_s)
             return "지금 조건에서 딱 맞는 {} 상품을 찾기 어렵네요.{} 카테고리나 사이즈를 조금 다르게 말씀해주시면 다시 찾아볼게요 :)".format(target_category or "", size_note)
     save_recommendations(recos)
+    if target_category:
+        st.session_state.pending_target_category = target_category
     situations = detect_situation_from_text(user_text)
     if situations:
         opener = "네, {} 자리에 어울릴 만한 쪽으로 골라드릴게요 :)".format(situations[0])
@@ -1692,6 +1843,8 @@ def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
         fake_product = current_product_dict(reco_context, reco_db)
         body_ctx = build_body_context()
         target_cat = infer_target_category_from_query(user_text, fake_product)
+        if target_cat:
+            st.session_state.pending_target_category = target_cat
         recos = recommend_products_for_query(user_text, fake_product, body_ctx, target_cat, limit=3)
         if recos:
             save_recommendations(recos)
@@ -1713,11 +1866,9 @@ def build_followup_recommendation_answer(user_text: str) -> Optional[str]:
                 if not purl2 and pno2:
                     purl2 = "https://www.misharp.co.kr/product/detail.html?product_no={}".format(pno2)
                 link2 = " [🔗]({})".format(purl2) if purl2 else ""
-                lines.append("{}. {}{}{} — {}".format(i2, r["product_name"], size_info, link2, reason_text) if reason_text
-                             else "{}. {}{}{}".format(i2, r["product_name"], size_info, link2))
+                lines.append("{}. {}{}{} — {}".format(i2, r["product_name"], size_info, link2, reason_text) if reason_text else "{}. {}{}{}".format(i2, r["product_name"], size_info, link2))
             lines.append("번호 말씀해주시면 사이즈감도 바로 봐드릴게요 :)")
             return "\n".join(lines)
-        # 추천 결과 없으면 fallback
         return "{}번 {} 기준으로 조건에 맞는 상품을 찾기 어렵네요. 카테고리를 조금 다르게 말씀해주시면 다시 찾아볼게요 :)".format(idx, name)
 
     # ── 사이즈 의도 감지
@@ -1947,6 +2098,10 @@ def slim_context_for_llm(product_context: Dict, db_product: Optional[Dict], user
         "policy_db": POLICY_DB,
         "color_match_note": "컬러매치는 결정론적 로직이 처리. 없는 색상 절대 언급 금지",
         "body_style_note": "체형코디는 결정론적 로직이 처리. 구체적 상품명은 allowed_candidates만 사용",
+        "review_note": build_review_note(current.get("product_no","")),
+        "model_note": build_model_note(),
+        "pending_situation": st.session_state.get("pending_situation", ""),
+        "pending_style": st.session_state.get("pending_style", ""),
     }
 
 
@@ -2052,6 +2207,14 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
     current_pname = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", ""))
     session_id = st.session_state.get("session_id", "")
     t_start = time.time()
+
+    update_conversation_hints(user_text)
+
+    # 짧은 긍정 응답은 이전 흐름 이어가기
+    if is_affirmative_short(user_text):
+        continued = continue_from_previous_flow()
+        if continued:
+            user_text = continued
 
     # ★ 채팅에서 사이즈 언급 시 session_state 자동 업데이트
     # "66반이라고", "저 77반이에요", "상의는 66이에요" 등 → 사이드바 없이도 저장
