@@ -342,18 +342,24 @@ def tokenize_name_for_match(s: str) -> List[str]:
     toks = [t for t in normalize_name_for_match(s).split() if len(t) >= 2 and t not in _COMPARE_STOPWORDS]
     return toks
 
+def is_compare_question(user_text: str) -> bool:
+    q = clean_text(user_text).replace(' ', '')
+    return any(k in q for k in ['비교','둘중','뭐가더','어느게','어느쪽','더나아','더괜찮','고민되'])
+
 def extract_compare_target_phrase(user_text: str) -> str:
     q = clean_text(user_text)
     patterns = [
-        r'이\s*(?:바지|팬츠|옷|상품|거)?\s*(?:랑|이랑|과|와)\s*(.+?)\s*(?:비교|중)',
-        r'(.+?)\s*(?:랑|이랑|과|와)\s*비교',
+        r'이\s*(?:블라우스|셔츠|니트|가디건|자켓|점퍼|아우터|바지|팬츠|슬랙스|데님|청바지|옷|상품|거)?\s*(?:랑|이랑|과|와)\s*(.+?)\s*(?:비교해줘|비교해주세요|비교|중)',
+        r'(.+?)\s*(?:랑|이랑|과|와)\s*(?:고민|비교)',
         r'(.+?)\s*(?:이|가)?\s*더\s*(?:나아|괜찮)',
     ]
     for p in patterns:
         m = re.search(p, q)
         if m:
             phrase = clean_text(m.group(1))
-            phrase = re.sub(r'^(이|그|저)\s*(바지|팬츠|옷|상품)\s*', '', phrase).strip()
+            phrase = re.sub(r'(이|그|저)\s*(블라우스|셔츠|니트|가디건|자켓|점퍼|아우터|바지|팬츠|슬랙스|데님|청바지|옷|상품|거)\s*', '', phrase).strip()
+            phrase = re.sub(r'(고민되는데|고민인데|고민중인데|고민중|비교해줘|비교해주세요|비교좀|비교)', '', phrase).strip()
+            phrase = phrase.strip(' ,.!?')
             return phrase
     return ''
 
@@ -435,16 +441,18 @@ def _comparison_pick_text(a_name: str, b_name: str, a_eval: Dict, b_eval: Dict, 
 
 def build_db_product_comparison_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
     q = clean_text(user_text)
-    q_no_space = q.replace(' ', '')
-    if not any(k in q_no_space for k in ['비교','둘중','뭐가더','어느게','어느쪽','더나아','더괜찮']):
+    if not is_compare_question(q):
         return None
     current = current_product_dict(product_context, db_product)
     phrase = extract_compare_target_phrase(q)
     if not phrase:
+        # 전체 문장에서 현재 상품명을 뺀 나머지로 한 번 더 시도
+        phrase = q.replace(current.get('product_name',''), '').replace('비교해줘','').replace('비교해주세요','').replace('비교','').strip()
+    if not phrase:
         return None
     candidates = find_product_candidates_from_phrase(phrase, current.get('product_no',''))
     if not candidates:
-        return None
+        return '비교하실 다른 상품명이 정확히 안 잡혀서요. 상품명을 조금만 더 정확하게 적어주시면 바로 비교해드릴게요 :)'
     if len(candidates) >= 2 and candidates[0].get('_match_score',0) - candidates[1].get('_match_score',0) < 12:
         c1, c2 = candidates[0], candidates[1]
         return f"말씀하신 상품이 {clean_text(c1.get('product_name',''))}인지, {clean_text(c2.get('product_name',''))}인지 한 번만 확인해주시면 바로 비교해드릴게요 :)"
@@ -1169,6 +1177,30 @@ def row_blob(rowd: Dict) -> str:
     ])
 
 
+def normalized_row_target(rowd: Dict) -> str:
+    sub = clean_text(rowd.get('sub_category',''))
+    name = clean_text(rowd.get('product_name',''))
+    if sub in {'데님','슬랙스','팬츠'} or any(k in name for k in ['바지','팬츠','슬랙스','데님','청바지']):
+        return '팬츠'
+    if '스커트' in sub or '스커트' in name or '치마' in name:
+        return '스커트'
+    if sub == '자켓' or any(k in name for k in ['자켓','재킷']):
+        return '자켓'
+    if sub == '점퍼' or any(k in name for k in ['점퍼','야상']):
+        return '점퍼'
+    if sub == '블라우스' or '블라우스' in name:
+        return '블라우스'
+    if sub == '셔츠' or '셔츠' in name:
+        return '셔츠'
+    if sub == '가디건' or '가디건' in name:
+        return '가디건'
+    if sub == '니트' or '니트' in name:
+        return '니트'
+    if sub == '티셔츠' or clean_text(rowd.get('category','')) == '티셔츠' or '티셔츠' in name or any(k in name for k in ['반팔티','긴팔티']):
+        return '티셔츠'
+    return ''
+
+
 def infer_target_category_from_query(user_text: str, current_product: Dict) -> str:
     q = clean_text(user_text)
     # ★ "어울리는 X 추천" 패턴 — for loop보다 먼저 처리
@@ -1453,6 +1485,32 @@ def build_color_answer(product_context: Dict, db_product: Optional[Dict]) -> Opt
     return "현재 확인되는 컬러는 {} 쪽이에요. 없는 컬러를 임의로 말씀드리기보다는 지금 보이는 옵션 기준으로 같이 봐드릴게요 :)".format(", ".join(colors))
 
 
+def build_color_style_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
+    if not is_color_question(user_text):
+        return None
+    if is_compare_question(user_text):
+        return None
+    colors = parse_color_options(product_context, db_product)
+    if not colors:
+        return None
+    q = clean_text(user_text)
+    situations = detect_situation_from_text(user_text)
+    pending_sit = st.session_state.get('pending_situation','')
+    situation = situations[0] if situations else pending_sit
+    user_top = clean_text(build_body_context().get('top_size',''))
+    body_hints = extract_user_body_from_text(user_text)
+    neutral = [c for c in colors if c in ['블랙','아이보리','베이지','그레이','네이비','화이트']]
+    point = [c for c in colors if c not in neutral]
+    if situation in ['학교','출근','면접','상견례']:
+        preferred = neutral[:2] if neutral else colors[:2]
+        tail = '지금처럼 {} 용도면 너무 튀는 색보다는 차분한 쪽이 더 안정적이에요.'.format(situation)
+    else:
+        preferred = colors[:2]
+        tail = '일상에서는 가장 손이 자주 가는 컬러로 고르시면 활용도가 좋아요.'
+    if body_hints.get('upper_body_hint') == '상체큰편' and any(c in preferred for c in ['아이보리','화이트']):
+        tail += ' 상체가 있는 편이면 아주 밝은 톤은 조금 더 도드라져 보일 수 있어서 블랙이나 베이지가 더 편할 수 있어요.'
+    return '현재 컬러는 {}가 있고요. 고객님 체형과 용도 기준이면 {} 쪽을 먼저 추천드리고 싶어요. {}'.format(', '.join(colors), ' / '.join(preferred), tail)
+
 def build_size_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Optional[str]:
     if not is_size_question(user_text):
         return None
@@ -1534,8 +1592,11 @@ def recommend_products_for_query(
         ranks = expand_size_text(clean_text(rowd.get("size_range", "")))
         score = 0
 
+        normalized_target = normalized_row_target(rowd)
         # ★ 카테고리 필터 - DB 실제 sub_category 값 기준
         if target_category == "팬츠":
+            if normalized_target != '팬츠':
+                continue
             if not (sub in {"데님", "슬랙스", "팬츠"} or any(k in row_name for k in ["바지", "팬츠", "슬랙스", "데님", "청바지"])):
                 continue
             if "스커트" in sub or "스커트" in row_name:
@@ -1544,7 +1605,7 @@ def recommend_products_for_query(
                 continue
             score += 15
         elif target_category == "스커트":
-            if not ("스커트" in sub or "스커트" in row_name):
+            if normalized_target != '스커트':
                 continue
             if bottom_rank and ranks and bottom_rank not in ranks:
                 continue
@@ -1568,7 +1629,7 @@ def recommend_products_for_query(
             if sub == "자켓":
                 score += 3  # 자켓 우선
         elif target_category == "자켓":
-            if not (sub == "자켓" or any(k in row_name for k in ["자켓", "재킷"])):
+            if normalized_target != '자켓':
                 continue
             if top_rank and ranks:
                 max_r = max(ranks)
@@ -1581,7 +1642,7 @@ def recommend_products_for_query(
             else:
                 score += 15
         elif target_category == "점퍼":
-            if not (sub == "점퍼" or any(k in row_name for k in ["점퍼", "야상"])):
+            if normalized_target != '점퍼':
                 continue
             if top_rank and ranks:
                 max_r = max(ranks)
@@ -1603,7 +1664,7 @@ def recommend_products_for_query(
             else:
                 score += 15
         elif target_category == "블라우스":
-            if not (sub == "블라우스" or "블라우스" in row_name):
+            if normalized_target != '블라우스':
                 continue
             if top_rank and ranks:
                 max_r = max(ranks)
@@ -1612,7 +1673,7 @@ def recommend_products_for_query(
             else:
                 score += 15
         elif target_category == "셔츠":
-            if not (sub == "셔츠" or "셔츠" in row_name):
+            if normalized_target != '셔츠':
                 continue
             if top_rank and ranks:
                 max_r = max(ranks)
@@ -1621,7 +1682,7 @@ def recommend_products_for_query(
             else:
                 score += 15
         elif target_category == "가디건":
-            if not (sub == "가디건" or "가디건" in row_name):
+            if normalized_target != '가디건':
                 continue
             if top_rank and ranks:
                 max_r = max(ranks)
@@ -1630,7 +1691,7 @@ def recommend_products_for_query(
             else:
                 score += 15
         elif target_category == "니트":
-            if not (sub == "니트" or "니트" in row_name):
+            if normalized_target not in {'니트','가디건'}:
                 continue
             if top_rank and ranks:
                 max_r = max(ranks)
@@ -1639,7 +1700,7 @@ def recommend_products_for_query(
             else:
                 score += 15
         elif target_category == "티셔츠":
-            if not (sub == "티셔츠" or cat == "티셔츠"):
+            if normalized_target != '티셔츠':
                 continue
             if top_rank and ranks:
                 max_r = max(ranks)
@@ -2392,19 +2453,18 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
         compare_ans = build_comparison_answer(user_text) or build_db_product_comparison_answer(user_text, product_context, db_product)
         # ★ 우선순위: 비교/추천 질문은 반드시 사이즈 판단보다 먼저 처리
         followup_ans = build_followup_recommendation_answer(user_text)
-        # ★ 컬러매치/체형코디는 추천보다 먼저 처리 (코디 관련 키워드 충돌 방지)
-        color_match_ans = build_color_match_answer(user_text, product_context, db_product)
-        body_style_ans = build_body_style_answer(user_text, product_context, db_product)
-        # 컬러매치/체형코디가 아닌 경우에만 추천 처리
+        color_match_ans = None if compare_ans else build_color_match_answer(user_text, product_context, db_product)
+        body_style_ans = None if compare_ans else build_body_style_answer(user_text, product_context, db_product)
+        color_style_ans = None if compare_ans else build_color_style_answer(user_text, product_context, db_product)
         reco_ans = build_recommendation_answer(user_text, product_context, db_product) if (
-            is_recommendation_question(user_text) and not color_match_ans and not body_style_ans
+            is_recommendation_question(user_text) and not color_match_ans and not body_style_ans and not color_style_ans and not compare_ans
         ) else None
         name_ans = build_name_answer(product_context, db_product) if is_name_question(user_text) else None
         policy_ans = get_fast_policy_answer(user_text)
-        size_ans = build_size_answer(user_text, product_context, db_product)
-        color_ans = build_color_answer(product_context, db_product) if is_color_question(user_text) else None
+        size_ans = build_size_answer(user_text, product_context, db_product) if not (compare_ans or reco_ans or color_style_ans or color_match_ans or body_style_ans) else None
+        color_ans = build_color_answer(product_context, db_product) if (is_color_question(user_text) and not compare_ans and not reco_ans and not color_style_ans) else None
 
-        direct_answers = [compare_ans, followup_ans, color_match_ans, body_style_ans, reco_ans, name_ans, policy_ans, size_ans, color_ans]
+        direct_answers = [compare_ans, followup_ans, color_match_ans, color_style_ans, body_style_ans, reco_ans, name_ans, policy_ans, size_ans, color_ans]
         answer = next((a for a in direct_answers if a), None)
 
         used_llm = False
