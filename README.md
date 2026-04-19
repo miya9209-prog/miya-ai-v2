@@ -1,1 +1,2 @@
-miya-ai-v2 main quality step-up with review summary + model profiles + stateful 상담 보강
+# miya-ai-v2-final
+Stable chatbot with safe size logic
