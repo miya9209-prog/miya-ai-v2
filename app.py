@@ -35,6 +35,8 @@ def ensure_state() -> None:
         "pending_situation": "",
         "pending_style": "",
         "last_compare_candidates": [],
+        "customer_name": "",
+        "customer_key": "",
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -207,6 +209,50 @@ def load_review_summary() -> Dict:
 MODEL_PROFILES = load_model_profiles()
 REVIEW_SUMMARY = load_review_summary()
 
+@st.cache_data(show_spinner=False)
+def load_customer_profiles() -> Dict[str, str]:
+    path = "customer_profiles.csv"
+    if not os.path.exists(path):
+        return {}
+    try:
+        import pandas as pd
+        df = pd.read_csv(path)
+        cols = {str(c).lower(): c for c in df.columns}
+        name_col = cols.get('name') or cols.get('customer_name') or cols.get('고객명')
+        key_cols = [c for k, c in cols.items() if k in {'customer_id', 'login_id', 'email', 'id', '회원아이디', '이메일'}]
+        mapping = {}
+        if name_col:
+            for _, row in df.iterrows():
+                name = clean_text(row.get(name_col, ''))
+                if not name:
+                    continue
+                for kc in key_cols:
+                    key = clean_text(row.get(kc, ''))
+                    if key:
+                        mapping[key.lower()] = name
+        return mapping
+    except Exception:
+        return {}
+
+CUSTOMER_PROFILES = load_customer_profiles()
+
+def resolve_customer_name() -> str:
+    params = st.query_params
+    direct = clean_text(params.get("customer_name", ""))
+    if direct:
+        return direct
+    for key_name in ["customer_id", "login_id", "email"]:
+        val = clean_text(params.get(key_name, ""))
+        if val and val.lower() in CUSTOMER_PROFILES:
+            return CUSTOMER_PROFILES[val.lower()]
+    return ""
+
+def addressed(text_value: str) -> str:
+    name = clean_text(st.session_state.get("customer_name", ""))
+    if not name:
+        return text_value
+    return str(text_value).replace("고객님", f"{name}님")
+
 # =========================================================
 # 로그
 # =========================================================
@@ -371,6 +417,30 @@ def is_name_question(user_text: str) -> bool:
 def is_coordi_request(user_text: str) -> bool:
     q = clean_text(user_text)
     return any(k in q for k in ["코디", "학교방문", "학교 방문", "행사룩", "모임룩", "학부모", "뭐 입", "같이 입"])
+
+def is_recommendation_question(user_text: str) -> bool:
+    q = clean_text(user_text)
+    return any(k in q for k in ["추천", "어울리는", "같이 입", "코디", "매치", "무슨 바지", "어떤 바지", "무슨 치마", "잘 어울리는", "그 안에", "다른 상품"])
+
+def is_option_choice_question(user_text: str) -> bool:
+    q = clean_text(user_text)
+    option_pairs = [("일자", "부츠컷"), ("숏", "롱"), ("1타입", "2타입"), ("타입1", "타입2"), ("A타입", "B타입"), ("기본", "와이드")]
+    return any(a in q and b in q for a, b in option_pairs) or ("타입" in q and any(k in q for k in ["어떤 게", "뭐가 더", "고를까", "선택"]))
+
+def build_option_choice_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
+    q = clean_text(user_text)
+    product_name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품")
+    if "일자" in q and "부츠컷" in q:
+        if any(k in q for k in ["다리", "짧", "키에 비해", "비율"]):
+            return addressed(f"{product_name}은 다리가 짧게 느껴지는 편이면 일자 쪽이 더 안정적이에요. 부츠컷은 분위기는 예쁘지만 밑단 퍼짐과 기장 영향을 더 받아서 비율에 조금 더 민감할 수 있거든요. 실패 적게 가시려면 일자 쪽이 더 안전해요 :)")
+        return addressed(f"{product_name}은 깔끔하고 무난하게 가시려면 일자 쪽이 더 안정적이고요, 조금 더 여성스럽고 다리선이 살아 보이는 느낌을 원하시면 부츠컷도 가능해요. 다만 부츠컷은 신발과 기장 영향을 조금 더 받아요 :)")
+    if "숏" in q and "롱" in q:
+        if any(k in q for k in ["키 작", "짧", "아담"]):
+            return addressed(f"{product_name}은 키가 아담한 편이면 숏 쪽이 더 안정적일 가능성이 커요. 롱은 분위기는 더 살지만 길이감이 길게 느껴질 수 있어서요 :)")
+        return addressed(f"{product_name}은 깔끔하게 떨어지는 쪽을 원하시면 숏, 길이감 있게 멋스럽게 입으시려면 롱 쪽으로 보시면 돼요 :)")
+    if "타입" in q:
+        return addressed(f"{product_name}은 옵션별 분위기 차이가 있을 수 있어서요. 지금처럼 실패 적게 가시려면 더 단정하고 군더더기 없는 쪽을 먼저 고르시는 게 안전해요. 타입명을 같이 적어주시면 바로 더 정확하게 골라드릴게요 :)")
+    return addressed(f"{product_name}은 옵션 선택도 체형과 원하는 분위기에 따라 달라져서요. 지금처럼 비율 보완이 중요하면 더 단정하고 군더더기 없는 쪽이 우선이에요 :)")
 
 def is_detail_request(user_text: str) -> bool:
     q = clean_text(user_text)
@@ -1199,6 +1269,9 @@ params = st.query_params
 current_url = clean_text(params.get("url", ""))
 passed_product_name = clean_text(params.get("pname", ""))
 passed_product_no = clean_text(params.get("pn", "")) or extract_product_no_from_url(current_url)
+customer_name = resolve_customer_name()
+if customer_name:
+    st.session_state.customer_name = customer_name
 product_context = fetch_product_context(current_url, passed_product_name, passed_product_no)
 db_product = get_db_product(product_context.get("product_no", ""))
 
@@ -1310,14 +1383,14 @@ st.markdown("<hr>", unsafe_allow_html=True)
 
 if not st.session_state.messages:
     if product_context.get("product_name"):
-        welcome = f"안녕하세요 :) {product_context.get('product_name','지금 보시는 상품')} 같이 봐드릴게요. 사이즈, 코디, 비교, 컬러 중 뭐부터 이야기해볼까요?"
+        welcome = addressed(f"안녕하세요 :) {product_context.get('product_name','지금 보시는 상품')} 같이 봐드릴게요. 사이즈, 코디, 비교, 컬러 중 뭐부터 이야기해볼까요?")
     else:
-        welcome = "안녕하세요 :) 지금은 일반 상담 모드예요. 상품 상세페이지에서 열면 그 상품 기준으로 더 정확하게 상담해드릴 수 있어요."
+        welcome = addressed("안녕하세요 :) 지금은 일반 상담 모드예요. 상품 상세페이지에서 열면 그 상품 기준으로 더 정확하게 상담해드릴 수 있어요.")
     st.session_state.messages.append({"role": "assistant", "content": welcome})
 
 def render_message(role: str, content: str):
     role_class = "assistant" if role == "assistant" else "user"
-    label = "미야언니" if role == "assistant" else "고객님"
+    label = "미야언니" if role == "assistant" else (clean_text(st.session_state.get("customer_name","")) + "님" if clean_text(st.session_state.get("customer_name","")) else "고객님")
     safe_content = html.escape(content).replace("\n", "<br>")
     st.markdown(
         f"""
