@@ -402,7 +402,7 @@ def is_pure_greeting(user_text: str) -> bool:
 
 def is_size_question(user_text: str) -> bool:
     q = clean_text(user_text)
-    return any(k in q for k in ["사이즈", "맞을까", "맞을까요", "맞겠나", "맞나", "맞아", "핏", "작을까", "클까", "여유", "타이트", "가슴", "선택", "몇으로", "몇 사이즈", "66이 좋", "77이 좋"])
+    return any(k in q for k in ["사이즈", "맞을까", "맞을까요", "맞겠나", "맞나", "맞아", "핏", "작을까", "클까", "여유", "타이트", "가슴"])
 
 def is_compare_question(user_text: str) -> bool:
     q = clean_text(user_text)
@@ -667,112 +667,6 @@ def parse_range_from_text(text: str) -> Tuple[Optional[int], Optional[int]]:
 def get_size_range_ranks(text: str) -> Tuple[Optional[int], Optional[int]]:
     return parse_range_from_text(text)
 
-
-def extract_size_tokens_from_text(text: str) -> List[str]:
-    t = clean_text(text)
-    if not t:
-        return []
-    near_chunks = []
-    for m in re.finditer(r"(?:사이즈|size|옵션|선택|구성|컬러)[:\s]{0,10}([^\n]{0,120})", t, flags=re.I):
-        near_chunks.append(m.group(1))
-    if not near_chunks:
-        near_chunks = [t]
-    ordered = ["44", "55반", "55", "66반", "66", "77반", "77", "88", "99"]
-    found = []
-    for chunk in near_chunks:
-        chunk = clean_text(chunk).replace('~','-').replace('/', ' ').replace(',', ' ')
-        if re.search(r"\b(FREE|free)\b", chunk):
-            found.extend(["55", "77"])
-        for tok in ordered:
-            if re.search(rf"(?<!\d){re.escape(tok)}(?!\d)", chunk):
-                found.append(tok)
-        if len(set(found)) >= 2:
-            break
-    uniq=[]
-    for tok in found:
-        if tok not in uniq:
-            uniq.append(tok)
-    return uniq
-
-
-def get_effective_size_range(product_context: Dict, db_product: Optional[Dict]) -> Tuple[Optional[int], Optional[int], str]:
-    db_text = clean_text((db_product or {}).get("size_range", ""))
-    ctx_text = " ".join([
-        clean_text(product_context.get("size_tip", "")),
-        clean_text(product_context.get("raw_excerpt", ""))[:2000],
-        clean_text(product_context.get("summary", "")),
-    ])
-    ctx_tokens = extract_size_tokens_from_text(ctx_text)
-    db_tokens = extract_size_tokens_from_text(db_text)
-    if len(ctx_tokens) >= 2:
-        ranks = [size_rank(t) for t in ctx_tokens if size_rank(t)]
-        if ranks:
-            return min(ranks), max(ranks), "/".join(ctx_tokens)
-    if len(db_tokens) >= 2:
-        ranks = [size_rank(t) for t in db_tokens if size_rank(t)]
-        if ranks:
-            return min(ranks), max(ranks), db_text or "/".join(db_tokens)
-    lo, hi = get_size_range_ranks(db_text or clean_text(product_context.get("size_tip", "")))
-    return lo, hi, db_text or clean_text(product_context.get("size_tip", ""))
-
-
-def extract_choice_sizes(user_text: str) -> List[str]:
-    ordered = ["44", "55반", "55", "66반", "66", "77반", "77", "88", "99"]
-    out=[]
-    q=clean_text(user_text)
-    for tok in ordered:
-        if re.search(rf"(?<!\d){re.escape(tok)}(?!\d)", q):
-            out.append(tok)
-    uniq=[]
-    for tok in out:
-        if tok not in uniq:
-            uniq.append(tok)
-    return uniq
-
-
-def is_size_choice_question(user_text: str) -> bool:
-    q = clean_text(user_text)
-    size_tokens = extract_choice_sizes(q)
-    if len(size_tokens) >= 2 and any(k in q for k in ["어떤", "뭐", "좋", "선택", "사야", "가야", "추천"]):
-        return True
-    return any(k in q for k in ["어떤 사이즈", "사이즈 선택", "뭘 선택", "몇 사이즈", "몇으로", "66이 좋", "77이 좋"])
-
-
-def build_size_choice_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
-    product_name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품")
-    user_size, body_label = get_active_user_size(product_context, db_product)
-    mentioned = extract_choice_sizes(user_text)
-    lo, hi, source_text = get_effective_size_range(product_context, db_product)
-    available = [s for s in ["44","55","55반","66","66반","77","77반","88","99"] if lo and hi and lo <= size_rank(s) <= hi]
-    if not mentioned and available:
-        mentioned = available[:]
-    hints = clean_text(user_text)
-    if body_label == "하의":
-        fuller = any(k in hints for k in ["힙", "엉덩이", "허벅지", "골반", "배", "복부"])
-    else:
-        fuller = any(k in hints for k in ["가슴", "어깨", "팔뚝", "상체"])
-    if len(mentioned) >= 2:
-        ordered = sorted(mentioned, key=lambda x: size_rank(x) or 0)
-        smaller, larger = ordered[0], ordered[-1]
-        if user_size == smaller + '반' if False else False:
-            pass
-        # 기본 원칙: 반 사이즈이거나 볼륨/힙 언급 있으면 큰 쪽 우선
-        if user_size.endswith('반') or fuller:
-            chosen = larger
-            reason = "반 사이즈이시고 볼륨감이 있는 쪽을 같이 보셔야 해서 너무 딱 맞게 가기보다 한 단계 여유 있게 보시는 게 더 안전해요." if fuller else "반 사이즈이시면 너무 딱 맞게 가기보다 한 단계 여유 있게 보시는 게 더 안정적이에요."
-        else:
-            chosen = smaller
-            reason = "전체적으로 정돈되게 입으시려면 작은 쪽부터 보셔도 괜찮아요."
-        avail_text = source_text or ("/".join(available) if available else "")
-        return f"{product_name}은 현재 보이는 사이즈가 {avail_text} 쪽으로 보여요. 고객님 {body_label} {user_size} 기준이면 {smaller}과 {larger} 중에서는 {chosen} 쪽을 먼저 추천드리고 싶어요. {reason}"
-    # fallback by nearest available
-    if available:
-        user_rank = size_rank(user_size) or 0
-        bigger = [s for s in available if (size_rank(s) or 0) >= user_rank]
-        chosen = bigger[0] if bigger else available[-1]
-        return f"{product_name}은 현재 보이는 사이즈가 {'/'.join(available)} 쪽이에요. 고객님 {body_label} {user_size} 기준이면 {chosen} 쪽부터 보시는 게 더 안전해요."
-    return build_size_answer(user_text, product_context, db_product)
-
 def context_uses_top_size(product_context: Dict, db_product: Optional[Dict]) -> bool:
     corpus = " ".join([
         clean_text((db_product or {}).get("category", "")),
@@ -847,7 +741,7 @@ def evaluate_size_support(user_size: str, body_label: str, product_context: Dict
 
     if not rank:
         return {"supported": None, "reason": "", "confidence": "unknown"}
-    lo, hi, effective_range_text = get_effective_size_range(product_context, db_product)
+    lo, hi = get_size_range_ranks(clean_text((db_product or {}).get("size_range", "")) or clean_text(product_context.get("size_tip", "")))
     range_ok = lo is not None and hi is not None and lo <= rank <= hi
     garment_chest = normalize_garment_chest(db_product)
     body_chest = body_chest_estimate(user_size)
@@ -856,10 +750,10 @@ def evaluate_size_support(user_size: str, body_label: str, product_context: Dict
         ease = garment_chest - body_chest
 
     if not range_ok:
-        return {"supported": False, "reason": f"현재 보이는 사이즈 {effective_range_text or '범위'} 기준으로는 고객님 {body_label} {user_size}보다 작게 나오는 편이에요.", "confidence": "range", "ease": ease}
+        return {"supported": False, "reason": f"{clean_text((db_product or {}).get('size_range', '')) or '사이즈 범위'} 기준으로는 고객님 {body_label} {user_size}보다 작게 나오는 편이에요.", "confidence": "range", "ease": ease}
 
     if ease is None:
-        return {"supported": True, "reason": f"현재 보이는 사이즈 {effective_range_text or '범위'} 기준으로는 고객님 {body_label} {user_size}도 같이 볼 수 있어요.", "confidence": "range", "ease": None}
+        return {"supported": True, "reason": f"고객님 {body_label} {user_size} 기준으로는 사이즈 범위 안에 들어와요.", "confidence": "range", "ease": None}
 
     if ease >= 10:
         return {"supported": True, "reason": "사이즈 범위 안이고 실측 기준으로도 여유가 있는 편이에요.", "confidence": "chest", "ease": ease}
@@ -1366,7 +1260,7 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_continue", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
         if is_pure_greeting(q):
-            return "안녕하세요 :) 지금 보시는 상품 같이 봐드릴게요. 궁금하신 걸 편하게 말씀해주시면 그 질문부터 바로 이어서 봐드릴게요."
+            return "안녕하세요 :) 지금 보시는 상품 같이 봐드릴게요. 사이즈, 코디, 비교, 컬러 중 편한 쪽부터 말씀 주세요."
         if is_followup_size_on_recommendations(q):
             answer = build_reco_followup_size_answer(q)
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_reco_followup", latency_ms=int((time.time()-started)*1000), product_context=product_context)
@@ -1404,15 +1298,11 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
         if policy:
             write_chat_log("assistant_response", user_text=q, answer=policy, response_mode="rule_policy", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return policy
-        if is_size_choice_question(q):
-            answer = build_size_choice_answer(q, product_context, db_product)
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_size_choice", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
         if is_size_question(q):
             answer = build_size_answer(q, product_context, db_product)
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_size", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
-        answer = "말씀하신 내용 기준으로 바로 이어서 봐드릴게요 :) 궁금한 걸 한 번만 더 편하게 적어주시면 그 질문에 맞춰 바로 답드릴게요."
+        answer = "지금 기준으로는 사이즈, 코디, 비교, 컬러 중 어떤 쪽을 먼저 보고 싶으신지 한 가지만 잡아주시면 바로 이어서 봐드릴게요 :)"
         write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="fallback", fallback_reason="generic", latency_ms=int((time.time()-started)*1000), product_context=product_context)
         return answer
     except Exception as e:
