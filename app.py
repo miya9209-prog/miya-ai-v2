@@ -39,11 +39,6 @@ def ensure_state() -> None:
         "customer_id": "",
         "customer_login_id": "",
         "customer_email": "",
-        "conversation_focus": "",
-        "recommendation_mode": "",
-        "last_intent": "",
-        "last_selected_product_name": "",
-        "user_body_hints": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -85,33 +80,6 @@ def size_rank(token: str) -> Optional[int]:
 
 def rank_to_size(rank: Optional[int]) -> str:
     return SIZE_LABELS.get(rank, "") if rank else ""
-
-
-USER_SELF_PREFIXES = ["난", "나는", "저", "저는", "제가", "전", "나는요", "난요"]
-PRODUCT_RANGE_WORDS = ["까지", "사이즈", "추천", "설명", "문구", "표기", "가능", "프리", "여유"]
-SIZE_TOKENS_DESC = ["99", "88", "77반", "77", "66반", "66", "55반", "55", "44"]
-
-def extract_user_size_mentions(user_text: str) -> List[Tuple[str, str]]:
-    q = clean_text(user_text)
-    mentions: List[Tuple[str, str]] = []
-    for body_label in ["상의", "하의", "신발"]:
-        for token in SIZE_TOKENS_DESC:
-            if re.search(rf"{body_label}\s*[: ]?\s*{re.escape(token)}", q):
-                mentions.append((body_label, token))
-    for prefix in USER_SELF_PREFIXES:
-        for token in SIZE_TOKENS_DESC:
-            if re.search(rf"{re.escape(prefix)}\s*(?:상의|하의|신발)?\s*[: ]?\s*{re.escape(token)}(?:[은는이가요\s]|$)", q):
-                mentions.append(("", token))
-    return mentions
-
-def extract_product_range_mentions(user_text: str) -> List[str]:
-    q = clean_text(user_text)
-    matches = re.findall(r"(44-66반|44-66|55-77반|55-77|55-88|66-88|66-99|77까지|88까지|99까지)", q)
-    return matches
-
-def looks_like_product_range_pushback(user_text: str) -> bool:
-    q = clean_text(user_text)
-    return bool(extract_product_range_mentions(q)) and any(w in q for w in PRODUCT_RANGE_WORDS)
 
 def build_body_context() -> Dict[str, str]:
     return {
@@ -537,25 +505,15 @@ def is_followup_size_on_recommendations(user_text: str) -> bool:
 # =========================================================
 def extract_selected_index(user_text: str) -> Optional[int]:
     q = clean_text(user_text)
-    m = re.search(r"([1-5])\s*번", q)
+    m = re.search(r"([123])번", q)
     if m:
         return int(m.group(1)) - 1
-    if q.strip() in {"1", "2", "3", "4", "5"}:
-        return int(q.strip()) - 1
     if "첫 번째" in q or "첫번째" in q:
         return 0
     if "두 번째" in q or "두번째" in q:
         return 1
     if "세 번째" in q or "세번째" in q:
         return 2
-    if "네 번째" in q or "네번째" in q:
-        return 3
-    if "다섯 번째" in q or "다섯번째" in q:
-        return 4
-    if any(k in q for k in ["그 상품", "그거", "그 옷", "아까 추천해준", "아까 그거"]):
-        idx = st.session_state.get("last_selected_index", None)
-        if idx is not None:
-            return idx
     return None
 
 def update_selected_index_from_message(user_text: str) -> None:
@@ -621,188 +579,6 @@ def update_conversation_context(user_text: str) -> None:
     if target:
         st.session_state.pending_target_category = target
 
-def extract_explicit_size_from_text(user_text: str, body_label_hint: str = "") -> str:
-    q = clean_text(user_text)
-    for token in ["99", "88", "77반", "77", "66반", "66", "55반", "55", "44"]:
-        if token in q:
-            return token
-    if body_label_hint == "신발":
-        m = re.search(r"(225|230|235|240|245|250|255|260)", q)
-        if m:
-            return m.group(1)
-    return ""
-
-
-def get_user_size_from_message(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> Tuple[str, str]:
-    body_label = "신발" if detect_category_from_name(clean_text((db_product or {}).get("product_name", "")) + " " + clean_text((db_product or {}).get("category", "")) + " " + clean_text(product_context.get("product_name", "")), "") == "신발" else ("하의" if not context_uses_top_size(product_context, db_product) else "상의")
-    explicit = extract_explicit_size_from_text(user_text, body_label)
-    if explicit:
-        return explicit, body_label
-    # 문장 속 숫자가 상품 설명 범위인지 확인하고, 그 경우 프로필 사이즈를 유지
-    active_size, active_label = get_active_user_size(product_context, db_product)
-    if looks_like_product_range_pushback(user_text):
-        return active_size, active_label
-    return active_size, active_label
-
-
-def extract_body_hints(user_text: str) -> List[str]:
-    q = clean_text(user_text)
-    hints = []
-    mapping = {
-        "hip": ["힙", "엉덩이", "골반"],
-        "thigh": ["허벅지", "하체"],
-        "belly": ["배", "복부", "뱃살", "허리"],
-        "chest": ["가슴", "상체"],
-        "arm": ["팔뚝", "소매", "어깨"],
-        "short_legs": ["다리가 짧", "다리 짧", "키가 작", "비율"],
-        "tall": ["키가 큰", "길지 않을까"],
-    }
-    for key, kws in mapping.items():
-        if any(k in q for k in kws):
-            hints.append(key)
-    return hints
-
-
-def infer_recommendation_mode(user_text: str) -> str:
-    q = clean_text(user_text)
-    if any(k in q for k in ["어울리는", "같이 입", "안에 입", "세트", "코디", "매치"]):
-        return "coordi"
-    if any(k in q for k in ["비슷한", "이거 말고", "다른 거", "대신", "또 없", "추천해줘", "보여줘"]):
-        return "alternative"
-    return "alternative"
-
-
-def infer_message_intent(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
-    q = clean_text(user_text)
-    if not q:
-        return "empty"
-    if is_pure_greeting(q):
-        return "greeting"
-    if is_affirmative(q):
-        return "affirmative"
-    if is_followup_size_on_recommendations(q):
-        return "reco_size"
-    if is_name_question(q):
-        return "name"
-    if is_compare_question(q):
-        return "compare"
-    if is_option_question(q):
-        return "option"
-    if is_feature_question(q):
-        return "feature"
-    if is_color_question(q):
-        return "color"
-    policy = get_fast_policy_answer(q)
-    if policy:
-        return "policy"
-    if any(k in q for k in ["소재", "원단", "세탁", "건조기", "보풀", "정전기", "여름", "겨울", "시원", "구김"]):
-        return "material"
-    if is_selected_item_outfit_request(q):
-        return "coordi"
-    if is_recommendation_question(q):
-        return infer_recommendation_mode(q)
-    if is_fit_question(q):
-        return "fit"
-    if is_size_question(q):
-        return "size"
-    if is_detail_request(q) and st.session_state.get("last_recommendations"):
-        return "selected_detail"
-    if extract_selected_index(q) is not None and st.session_state.get("last_recommendations"):
-        return "selected_detail"
-    if st.session_state.get("conversation_focus") in {"fit", "size"} and extract_body_hints(q):
-        return "fit"
-    if st.session_state.get("conversation_focus") in {"alternative", "coordi"} and any(k in q for k in ["그거", "그 상품", "어울", "같이", "코디"]):
-        return st.session_state.get("conversation_focus")
-    return "fit"
-
-
-def build_material_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
-    pname = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품")
-    fabric = clean_text((db_product or {}).get("fabric", "") or product_context.get("material", "") or product_context.get("summary", ""))
-    summary = clean_text((db_product or {}).get("product_summary", "") or product_context.get("summary", ""))
-    q = clean_text(user_text)
-    if "세탁" in q or "건조기" in q:
-        if any(k in fabric + " " + summary for k in ["울", "레이온", "니트"]):
-            return f"{pname}은 소재 특성상 세탁기는 조심해서 보시는 게 좋아요. 가능하면 손세탁이나 드라이 쪽으로 관리하시는 게 더 안전해요."
-        return f"{pname}은 아주 예민한 원단으로만 보이진 않지만, 오래 예쁘게 입으시려면 가벼운 단독 세탁 쪽이 더 안전해요. 건조기는 수축이나 변형이 있을 수 있어서 피하시는 걸 권해드릴게요."
-    if any(k in q for k in ["여름", "시원", "덥"]):
-        if any(k in fabric + " " + summary for k in ["쿨", "메쉬", "얇", "시원", "린넨", "레이온"]):
-            return f"{pname}은 여름에도 비교적 가볍게 입기 괜찮은 쪽이에요. 피부에 답답하게 달라붙는 타입보다는 조금 더 산뜻하게 느껴질 가능성이 커요."
-        return f"{pname}은 한여름용으로 아주 시원한 타입이라기보다, 계절 폭이 조금 더 넓은 쪽으로 보시면 맞아요."
-    if "겨울" in q:
-        if any(k in fabric + " " + summary for k in ["울", "두께", "니트"]):
-            return f"{pname}은 겨울까지도 활용 범위가 있는 편이에요. 다만 한겨울엔 이너나 아우터와 같이 보시는 게 좋아요."
-        return f"{pname}은 겨울 단독보다는 간절기나 실내 위주로 더 잘 맞는 쪽이에요."
-    if "보풀" in q:
-        return f"{pname}은 마찰이 많은 환경에서는 어느 정도 관리가 필요할 수 있어요. 다만 보이는 원단 정보상 아주 예민한 타입으로만 보이진 않아요."
-    if "구김" in q:
-        if any(k in fabric + " " + summary for k in ["폴리", "스판", "링클프리"]):
-            return f"{pname}은 구김 부담이 큰 타입은 아닌 쪽으로 보여요. 하루 입었을 때도 너무 흐트러져 보이는 느낌은 덜할 가능성이 커요."
-        return f"{pname}은 소재 특성상 생활 구김은 조금 보실 수 있어요. 대신 그만큼 자연스러운 결로 보실 수도 있어요."
-    return f"{pname}은 원단 설명을 보면 {fabric or summary[:80]} 쪽으로 보이고요. 입는 계절감이나 관리 포인트까지 같이 보면 훨씬 정확하게 고르실 수 있어요."
-
-
-def build_fit_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
-    user_size, body_label = get_user_size_from_message(user_text, product_context, db_product)
-    product_name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품")
-    hints = extract_body_hints(user_text)
-    st.session_state.user_body_hints = hints
-    result = evaluate_size_support(user_size, body_label, product_context, db_product) if user_size else {"supported": None, "reason": ""}
-    fit_corpus = " ".join([clean_text((db_product or {}).get("fit_type", "")), clean_text((db_product or {}).get("body_cover_features", "")), clean_text(product_context.get("fit", "")), clean_text(product_context.get("summary", ""))])
-    fit_type = classify_fit_text(fit_corpus)
-    parts = []
-
-    if user_size:
-        if result.get("supported") is False:
-            parts.append(f"고객님 {body_label} {user_size} 기준이면 {product_name}은 핏 쪽으로는 조금 여유가 아쉬울 수 있어요.")
-        elif result.get("supported") == "edge":
-            parts.append(f"고객님 {body_label} {user_size} 기준이면 {product_name}은 일단 입는 쪽으로는 가능해 보여요.")
-            parts.append("다만 아주 낙낙하게 떨어진다기보다는 깔끔하게 맞는 느낌으로 보시면 더 정확해요.")
-        else:
-            parts.append(f"고객님 {body_label} {user_size} 기준이면 {product_name}은 같이 보실 수 있는 쪽이에요 :)")
-            if result.get("reason"):
-                parts.append(result.get("reason", ""))
-    else:
-        parts.append(f"{product_name}은 전체 핏 기준으로 보면")
-
-    if "hip" in hints:
-        if any(k in fit_corpus for k in ["와이드", "세미와이드", "여유", "배기", "핀턱"]):
-            parts.append("힙이 있는 편이어도 너무 민망하게 붙는 타입은 아니라 부담이 큰 쪽은 아니에요.")
-        else:
-            parts.append("힙이 있는 편이면 골반이나 힙 라인은 조금 더 또렷하게 느껴질 수는 있어요.")
-    if "thigh" in hints:
-        parts.append("허벅지 쪽이 고민이면 너무 매끈하게 붙기보다 살짝 떨어지는 타입이 더 안정적인데, 이 상품은 그 기준에서 크게 과한 편은 아니에요.")
-    if "belly" in hints:
-        if any(k in fit_corpus for k in ["핀턱", "여유", "루즈", "세미와이드"]):
-            parts.append("복부 라인을 아주 적나라하게 드러내는 쪽은 아니라 상대적으로 편하게 보실 수 있어요.")
-        else:
-            parts.append("배 쪽이 고민이면 앞부분은 조금 더 또렷하게 느껴질 수 있어서 상의를 같이 정리해 입는 게 좋아요.")
-    if "chest" in hints:
-        parts.append("가슴이 있는 편이면 앞쪽 여유감은 체형에 따라 다르게 느껴질 수 있어서, 아주 루즈한 느낌보다는 깔끔하게 맞는 쪽으로 보시면 더 정확해요.")
-    if "arm" in hints and context_uses_top_size(product_context, db_product):
-        parts.append("어깨나 소매가 신경 쓰이는 체형이면 팔선이 드러나는지보다 전체 여유감을 같이 보시는 게 더 중요해요.")
-    if "short_legs" in hints:
-        if any(k in fit_corpus for k in ["와이드", "루즈"]) or clean_text((db_product or {}).get("length_type", "")) in {"롱", "long"}:
-            parts.append("다리 비율이 짧게 느껴지는 편이면 기장이 너무 길면 오히려 비율이 더 짧아 보일 수 있어요.")
-        parts.append("그래서 이 경우는 핏 자체보다 기장 선택을 같이 보는 게 더 중요해요.")
-    if fit_type == "loose" and not hints:
-        parts.append("전체적으로 답답하게 붙는 타입은 아닐 가능성이 커요.")
-    elif fit_type == "regular" and not hints:
-        parts.append("너무 루즈하기보다는 깔끔하게 정리되는 쪽에 더 가까워요.")
-    review_note = build_review_note(clean_text((db_product or {}).get("product_no", "") or product_context.get("product_no", "")), user_size)
-    if review_note:
-        parts.append(review_note)
-    # 중복 제거
-    cleaned = []
-    seen = set()
-    for p in parts:
-        cp = clean_text(p)
-        if cp and cp not in seen:
-            seen.add(cp)
-            cleaned.append(cp)
-    return " ".join(cleaned)
-
-
 def continue_previous_flow(product_context: Dict, db_product: Optional[Dict]) -> str:
     pending_target = clean_text(st.session_state.get("pending_target_category", ""))
     pending_situation = clean_text(st.session_state.get("pending_situation", ""))
@@ -817,7 +593,7 @@ def continue_previous_flow(product_context: Dict, db_product: Optional[Dict]) ->
         return recommend_products(prompt, product_context, db_product)
     if st.session_state.get("last_recommendations"):
         return "좋아요 :) 방금 고른 후보 기준으로 더 볼게요. 번호나 보고 싶은 포인트를 바로 말씀 주세요."
-    return "좋아요 :) 지금 보시는 상품 기준으로 바로 이어서 볼게요. 궁금한 점 편하게 말씀 주세요."
+    return "좋아요 :) 지금 보시는 상품 기준으로 바로 이어서 같이 볼게요. 궁금한 걸 자연스럽게 말씀해주시면 그 흐름대로 봐드릴게요."
 
 def get_active_base_product(product_context: Dict, db_product: Optional[Dict]) -> Dict:
     override = st.session_state.get("active_product_override", {}) or {}
@@ -994,7 +770,7 @@ def is_size_pushback_question(user_text: str) -> bool:
     return any(k in q for k in ["추천이던데", "77까지", "66까지", "타이트하다고", "근데 왜", "그런데 왜", "추천인데", "맞다며"])
 
 def build_size_pushback_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
-    user_size, body_label = get_user_size_from_message(user_text, product_context, db_product)
+    user_size, body_label = get_active_user_size(product_context, db_product)
     product_name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품")
     result = evaluate_size_support(user_size, body_label, product_context, db_product)
     fit_corpus = " ".join([
@@ -1005,15 +781,15 @@ def build_size_pushback_answer(user_text: str, product_context: Dict, db_product
     ])
     fit_type = classify_fit_text(fit_corpus)
     if result.get("supported") is False:
-        return f"{product_name}은 상품 설명 문구가 넓게 느껴져도, 실제 핏은 고객님 {body_label} {user_size} 기준으로 조금 더 정돈되게 느껴질 수 있어서 제가 보수적으로 말씀드린 거예요. 아예 못 입는다는 뜻보다는, 여유감 기대치보다는 핏 체감이 더 중요하다는 쪽으로 이해해주시면 제일 정확해요."
+        return f"{product_name}은 추천 범위 문구상으로는 넓어 보여도, 고객님 {body_label} {user_size} 기준으로 보면 편하게 입는 느낌까지는 아니어서 제가 보수적으로 말씀드린 거예요. 입는 것 자체보다 핏이 어떻게 떨어질지가 더 중요해서, 지금 기준으로는 다른 쪽을 같이 보시는 게 더 안전해요."
     if result.get("supported") == "edge":
-        return f"{product_name}은 고객님 {body_label} {user_size} 기준으로 입는 쪽은 가능해 보여요. 다만 설명에 여유 있게 적혀 있어도 실제로는 아주 낙낙한 느낌보다는 깔끔하게 맞는 쪽으로 느껴질 수 있어서 그 차이를 같이 말씀드린 거예요."
+        return f"{product_name}은 추천 범위 안쪽이긴 한데 고객님 {body_label} {user_size}가 딱 경계에 가까운 편이라서 그래요. 못 입는다는 뜻은 아니고, 여유 있게 기대하시면 조금 아쉬울 수 있다는 쪽으로 이해하시면 제일 정확해요."
     if fit_type == "regular":
-        return f"{product_name}은 고객님 {body_label} {user_size} 기준으로 입으실 수 있는 쪽이 맞아요. 다만 상품 설명이 넉넉하게 느껴져도 실제 핏은 정돈된 쪽일 수 있어서, 루즈하게 떨어진다기보다 깔끔하게 맞는 느낌으로 보시면 더 맞아요."
+        return f"{product_name}은 {body_label} {user_size} 기준으로 입으실 수 있는 쪽이 맞아요. 다만 추천 문구가 넉넉하게 느껴지더라도 실제 핏은 정돈된 쪽일 수 있어서, 루즈하게 떨어진다기보다 깔끔하게 맞는 느낌으로 보시면 더 맞아요."
     return f"{product_name}은 고객님 {body_label} {user_size} 기준으로 무리 없는 쪽이 맞아요. 제가 드린 설명은 못 입는다는 뜻이 아니라, 실제로는 여유감보다 핏 체감이 더 중요하다는 뜻으로 봐주시면 돼요."
 
 def build_size_answer(user_text: str, product_context: Dict, db_product: Optional[Dict]) -> str:
-    user_size, body_label = get_user_size_from_message(user_text, product_context, db_product)
+    user_size, body_label = get_active_user_size(product_context, db_product)
     product_name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품")
     if not user_size:
         if body_label == "신발":
@@ -1036,7 +812,7 @@ def build_size_answer(user_text: str, product_context: Dict, db_product: Optiona
         return f"고객님 신발 {user_size} 기준이면 {product_name}은 {result.get('reason','같이 볼 수 있는 쪽이에요.')}"
 
     if result.get("supported") is False:
-        parts.append(f"고객님 {body_label} {user_size} 기준이면 {product_name}은 핏 쪽으로는 조금 여유가 아쉬울 수 있어요.")
+        parts.append(f"고객님 {body_label} {user_size} 기준이면 {product_name}은 편하게 입는 기준으로는 추천을 강하게 드리기 어려워요.")
         parts.append(result.get("reason", ""))
         if upper_heavy and context_uses_top_size(product_context, db_product):
             parts.append("상체 쪽은 조금 더 또렷하게 느껴질 수 있어서 여유 있는 쪽을 같이 보시는 게 더 안전해요.")
@@ -1245,7 +1021,7 @@ def build_selected_item_detail_answer(user_text: str) -> str:
         "size_tip": clean_text(row.get("size_range", "")),
         "product_no": clean_text(row.get("product_no", "")),
     }
-    user_size, body_label = get_user_size_from_message(user_text, temp_ctx, row)
+    user_size, body_label = get_active_user_size(temp_ctx, row)
     size_result = evaluate_size_support(user_size, body_label, temp_ctx, row)
     q = clean_text(user_text)
     want_size = "사이즈" in q
@@ -1286,7 +1062,7 @@ def build_reco_followup_size_answer(user_text: str) -> str:
         "size_tip": clean_text(row.get("size_range", "")),
         "product_no": clean_text(row.get("product_no", "")),
     }
-    user_size, body_label = get_user_size_from_message(user_text, temp_ctx, row)
+    user_size, body_label = get_active_user_size(temp_ctx, row)
     result = evaluate_size_support(user_size, body_label, temp_ctx, row)
     review_note = build_review_note(clean_text(row.get("product_no", "")), user_size)
     answer = f"{idx+1}번으로 추천드린 {clean_text(row.get('product_name',''))}은 고객님 {body_label} {user_size} 기준으로 보면 {result.get('reason','무리 없는 쪽으로 보여요.')}"
@@ -1478,82 +1254,56 @@ def process_user_message(user_text: str, product_context: Dict, db_product: Opti
             return ""
         update_selected_index_from_message(q)
         update_conversation_context(q)
-        intent = infer_message_intent(q, product_context, db_product)
-        st.session_state.last_intent = intent
 
-        if intent == "affirmative":
+        if is_affirmative(q):
             answer = continue_previous_flow(product_context, db_product)
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_continue", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
-        if intent == "greeting":
-            answer = "안녕하세요 :) 지금 보시는 상품 같이 봐드릴게요. 궁금한 점 편하게 말씀 주시면 바로 이어서 봐드릴게요."
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_greeting", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
-        if intent == "reco_size":
+        if is_pure_greeting(q):
+            return "안녕하세요 :) 지금 보시는 상품 같이 봐드릴게요. 사이즈, 코디, 비교, 컬러 중 편한 쪽부터 말씀 주세요."
+        if is_followup_size_on_recommendations(q):
             answer = build_reco_followup_size_answer(q)
-            st.session_state.conversation_focus = "size"
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_reco_followup", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
-        if intent == "name":
+        if is_name_question(q):
             name = clean_text((db_product or {}).get("product_name", "") or product_context.get("product_name", "") or "지금 보시는 상품")
             answer = f"지금 보시는 상품은 {name}이에요 :)"
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_name", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
-        if intent == "compare":
+        if is_compare_question(q):
             answer = build_comparison_answer(q, product_context, db_product)
-            st.session_state.conversation_focus = "compare"
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_compare", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
-        if intent == "color":
+        if is_color_question(q):
             answer = build_color_style_answer(q, product_context, db_product)
-            st.session_state.conversation_focus = "color"
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_color", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
-        if intent == "option":
-            answer = build_option_choice_answer(q, product_context, db_product)
-            st.session_state.conversation_focus = "option"
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_option", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
-        if intent == "feature":
-            answer = build_feature_answer(q, product_context, db_product)
-            st.session_state.conversation_focus = "feature"
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_feature", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
-        if intent == "material":
-            answer = build_material_answer(q, product_context, db_product)
-            st.session_state.conversation_focus = "material"
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_material", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
-        if intent == "coordi":
+        if is_selected_item_outfit_request(q):
             answer = recommend_products(q, product_context, db_product)
-            st.session_state.conversation_focus = "coordi"
-            st.session_state.recommendation_mode = "coordi"
+            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_selected_outfit", latency_ms=int((time.time()-started)*1000), product_context=product_context)
+            return answer
+        if is_coordi_request(q):
+            answer = build_school_visit_coordi_answer(q, product_context, db_product)
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_coordi", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
-        if intent == "alternative":
+        if is_recommendation_question(q):
             answer = recommend_products(q, product_context, db_product)
-            st.session_state.conversation_focus = "alternative"
-            st.session_state.recommendation_mode = "alternative"
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_recommendation", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
-        if intent == "selected_detail":
+        if is_detail_request(q) and st.session_state.get("last_recommendations"):
             answer = build_selected_item_detail_answer(q)
-            st.session_state.conversation_focus = "selected_detail"
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_selected_detail", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
-        if intent == "policy":
-            answer = get_fast_policy_answer(q) or "교환/반품/배송 관련 안내 같이 봐드릴게요 :)"
-            st.session_state.conversation_focus = "policy"
-            write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_policy", latency_ms=int((time.time()-started)*1000), product_context=product_context)
-            return answer
-        if intent == "size":
+        policy = get_fast_policy_answer(q)
+        if policy:
+            write_chat_log("assistant_response", user_text=q, answer=policy, response_mode="rule_policy", latency_ms=int((time.time()-started)*1000), product_context=product_context)
+            return policy
+        if is_size_question(q):
             answer = build_size_answer(q, product_context, db_product)
-            st.session_state.conversation_focus = "size"
             write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_size", latency_ms=int((time.time()-started)*1000), product_context=product_context)
             return answer
-        answer = build_fit_answer(q, product_context, db_product)
-        st.session_state.conversation_focus = "fit"
-        write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="rule_fit", latency_ms=int((time.time()-started)*1000), product_context=product_context)
+        answer = "지금 기준으로는 사이즈, 코디, 비교, 컬러 중 어떤 쪽을 먼저 보고 싶으신지 한 가지만 잡아주시면 바로 이어서 봐드릴게요 :)"
+        write_chat_log("assistant_response", user_text=q, answer=answer, response_mode="fallback", fallback_reason="generic", latency_ms=int((time.time()-started)*1000), product_context=product_context)
         return answer
     except Exception as e:
         answer = "앗, 제가 방금 말을 매끄럽게 못 이었어요. 한 번만 더 보내주시면 바로 이어서 봐드릴게요 :)"
