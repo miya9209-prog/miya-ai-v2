@@ -127,16 +127,19 @@ def detect_category_from_name(name: str, raw_text: str = "") -> str:
         return "니트티"
     if "블라우스" in corpus:
         return "블라우스"
-    if "셔츠" in corpus and "셔츠 자켓" not in corpus:
-        return "셔츠"
+    # 티셔츠 안의 '셔츠' 때문에 셔츠로 오인되지 않도록 상의 카테고리 순서를 더 엄격하게 본다.
     if "맨투맨" in corpus:
         return "맨투맨"
     if "티셔츠" in corpus:
         return "티셔츠"
+    if "셔츠" in corpus and all(k not in corpus for k in ["티셔츠", "맨투맨"]):
+        return "셔츠"
     if "니트" in corpus or "가디건" in corpus:
         return "니트"
-    if any(k in corpus for k in ["자켓", "재킷", "점퍼", "코트", "베스트", "조끼"]):
+    if any(k in corpus for k in ["자켓", "재킷", "코트", "베스트", "조끼"]):
         return "자켓"
+    if any(k in corpus for k in ["점퍼", "바람막이", "후드 점퍼"]):
+        return "점퍼"
     if any(k in corpus for k in SHOE_KEYWORDS):
         return "신발"
     if any(k in corpus for k in BAG_KEYWORDS):
@@ -412,7 +415,10 @@ def is_color_question(user_text: str) -> bool:
     q = clean_text(user_text)
     if is_compare_question(q):
         return False
-    return any(k in q for k in ["컬러", "색", "무슨 색", "어떤 색", "색상"])
+    # 색을 언급하더라도 추천/코디 요청이면 컬러 답변으로 먹지 않도록 한다.
+    if any(k in q for k in ["추천", "어울리는", "코디", "같이 입", "매치"]) and any(k in q for k in ["블라우스", "셔츠", "자켓", "바지", "슬랙스", "팬츠", "니트", "가디건", "신발", "가방"]):
+        return False
+    return any(k in q for k in ["컬러", "색", "무슨 색", "어떤 색", "색상", "활용성"])
 
 def is_name_question(user_text: str) -> bool:
     q = clean_text(user_text).replace(" ", "")
@@ -959,10 +965,15 @@ def row_blob(rowd: Dict) -> str:
 
 def row_matches_target(rowd: Dict, target_cat: str) -> bool:
     row_cat = normalized_row_category(rowd)
+    name = clean_text(rowd.get("product_name", ""))
     if target_cat == "니트":
         return row_cat in {"니트", "니트티"}
     if target_cat == "니트티":
         return row_cat == "니트티"
+    if target_cat == "셔츠":
+        return row_cat == "셔츠" and all(k not in name for k in ["티셔츠", "맨투맨"])
+    if target_cat == "자켓":
+        return row_cat == "자켓" and all(k not in name for k in ["점퍼", "바람막이", "후드"])
     return row_cat == target_cat
 
 def item_supports_user(rowd: Dict, target_cat: str) -> bool:
@@ -997,7 +1008,14 @@ def get_base_selected_product() -> Optional[Dict]:
 
 def build_style_reason(rowd: Dict, user_text: str, target_cat: str) -> str:
     name = clean_text(rowd.get("product_name", ""))
-    corpus = " ".join([name, clean_text(rowd.get("product_summary", "")), clean_text(rowd.get("fit_type", "")), clean_text(rowd.get("style_tags", "")), clean_text(rowd.get("body_cover_features", ""))])
+    corpus = " ".join([
+        name,
+        clean_text(rowd.get("product_summary", "")),
+        clean_text(rowd.get("fit_type", "")),
+        clean_text(rowd.get("style_tags", "")),
+        clean_text(rowd.get("body_cover_features", "")),
+        clean_text(rowd.get("color_options", "")),
+    ])
     q = clean_text(user_text)
     reasons = []
     selected_base = get_base_selected_product()
@@ -1009,41 +1027,52 @@ def build_style_reason(rowd: Dict, user_text: str, target_cat: str) -> str:
         elif any(k in corpus for k in ["논페이드", "데님"]):
             reasons.append("너무 힘주지 않으면서도 단정하게 연결하기 좋은 쪽이에요")
         else:
-            if selected_base:
-                reasons.append(f"{selected_base.get('product_name','지금 고른 상의')}랑 붙였을 때 전체 라인이 깔끔하게 정리되는 쪽이에요")
-            else:
-                reasons.append("전체 실루엣이 과하게 무겁지 않게 정리되는 쪽이에요")
-    elif target_cat in ["블라우스", "셔츠"]:
-        if any(k in corpus for k in ["히든", "카라", "반오픈"]):
-            reasons.append("자켓 안에 받쳐 입었을 때 단정한 느낌이 잘 살아나는 쪽이에요")
-        elif any(k in corpus for k in ["스트랩", "랩"]):
-            reasons.append("여성스럽지만 과하지 않게 라인을 정리해주는 쪽이에요")
+            reasons.append("전체 실루엣이 과하게 무겁지 않게 정리되는 쪽이에요")
+    elif target_cat == "블라우스":
+        if any(k in corpus for k in ["브이넥", "브이 넥"]):
+            reasons.append("목선이 답답해 보이지 않아 베이지 팬츠랑 붙였을 때 더 산뜻한 쪽이에요")
+        elif any(k in corpus for k in ["프릴", "타이", "리본"]):
+            reasons.append("여성스러운 포인트가 있지만 과하지 않아서 중요한 자리에도 무난한 쪽이에요")
         else:
-            reasons.append("출근룩이나 모임룩에 무난하게 받쳐 입기 좋은 쪽이에요")
+            reasons.append("팬츠와 붙였을 때 너무 힘주지 않고 단정하게 정리되는 블라우스 쪽이에요")
+    elif target_cat == "셔츠":
+        if any(k in corpus for k in ["실키", "드레이프", "레이온"]):
+            reasons.append("베이지 팬츠와 같이 입었을 때 너무 딱딱하지 않고 부드럽게 떨어지는 쪽이에요")
+        elif any(k in corpus for k in ["카라", "히든", "버튼"]):
+            reasons.append("출근룩으로 입었을 때 단정한 인상이 잘 살아나는 셔츠 쪽이에요")
+        else:
+            reasons.append("슬랙스와 붙였을 때 가장 실패 적게 가는 기본 셔츠 쪽이에요")
     elif target_cat == "자켓":
-        if any(k in corpus for k in ["셔츠 자켓", "가벼운", "경량"]):
-            reasons.append("부담 없이 걸치기 좋고 실루엣이 답답하지 않은 편이에요")
-        elif any(k in corpus for k in ["백버튼", "클래식", "정장"]):
-            reasons.append("전체 실루엣을 단정하게 잡아주는 편이에요")
+        if any(k in corpus for k in ["클래식", "정장", "테일러드"]):
+            reasons.append("전체 실루엣을 단정하게 잡아주는 자켓 쪽이에요")
+        elif any(k in corpus for k in ["크롭", "숏"]):
+            reasons.append("허리선이 올라와 보여 팬츠 비율을 더 산뜻하게 살리기 좋은 쪽이에요")
         else:
-            reasons.append("핏이 과하게 크지 않아 깔끔하게 정리돼 보이기 좋아요")
+            reasons.append("핏이 과하게 크지 않아 출근룩 위에 깔끔하게 걸치기 좋은 쪽이에요")
     elif target_cat == "신발":
         reasons.append("코디를 너무 무겁지 않게 마무리해주기 좋은 쪽이에요")
     elif target_cat == "가방":
         reasons.append("전체 스타일을 단정하게 정리해주기 좋은 쪽이에요")
     else:
         if any(k in corpus for k in ["루즈", "여유"]):
-            reasons.append("상체가 있는 편이어도 답답한 느낌이 덜한 편이에요")
+            reasons.append("답답한 느낌이 덜하고 편하게 받쳐 입기 좋은 쪽이에요")
         elif any(k in corpus for k in ["슬림", "정핏"]):
             reasons.append("너무 부해 보이지 않고 깔끔하게 잡히는 쪽이에요")
         else:
             reasons.append("무난하게 손이 가면서 실루엣이 정리되는 쪽이에요")
     if any(k in q for k in ["출근", "학교", "상담", "방문", "모임"]):
         reasons.append("지금처럼 단정하게 보여야 하는 자리에도 잘 맞는 쪽이에요")
+    elif selected_base and target_cat in ["블라우스", "셔츠", "자켓"]:
+        reasons.append(f"{selected_base.get('product_name','이 바지')}와 붙였을 때 톤이 과하게 어긋나지 않는 쪽이에요")
     review_note = build_review_note(clean_text(rowd.get("product_no", "")))
     if review_note:
         reasons.append(review_note.replace("후기", "").strip())
-    return " ".join(reasons[:2]).strip()
+    # 같은 문구 반복을 줄이기 위해 중복 제거
+    dedup = []
+    for r in reasons:
+        if r and r not in dedup:
+            dedup.append(r)
+    return " ".join(dedup[:2]).strip()
 
 def pick_recommendation_rows(target_cat: str, user_text: str, product_context: Dict, db_product: Optional[Dict], limit: int = 3) -> List[Dict]:
     current_no = clean_text((db_product or {}).get("product_no", "") or product_context.get("product_no", ""))
@@ -1302,14 +1331,28 @@ def build_color_style_answer(user_text: str, product_context: Dict, db_product: 
             colors.append(c)
     if not colors:
         return f"{product_name}은 컬러를 딱 잘라 말씀드리기보다는 지금 보이는 옵션 기준으로 같이 보는 게 좋아요. 원하시면 차분한 쪽이 나은지, 얼굴이 덜 답답해 보이는 쪽이 나은지 기준으로 골라드릴게요 :)"
-    formal = any(k in q for k in ["출근", "학교", "상담", "면접", "모임"]) or clean_text(st.session_state.get("pending_situation","")) in {"학교","출근","모임"}
+    formal = any(k in q for k in ["출근", "학교", "상담", "면접", "모임", "활용성"]) or clean_text(st.session_state.get("pending_situation","")) in {"학교","출근","모임"}
     upper_heavy = any(k in q for k in ["상체", "가슴"]) or clean_text(st.session_state.get("body_top","")) in {"77","77반","88"}
     if formal:
-        preferred = [c for c in colors if c in ["아이보리", "베이지", "블랙", "네이비", "그레이"]]
-        picked = preferred[:2] if preferred else colors[:2]
-        msg = f"{product_name}은 {', '.join(colors)} 쪽으로 보이고요. 지금처럼 단정하게 입으실 거면 {' / '.join(picked)} 쪽이 제일 무난하고 깔끔해요."
+        if "블랙" in colors:
+            first_pick = "블랙"
+        elif "베이지" in colors:
+            first_pick = "베이지"
+        else:
+            first_pick = colors[0]
+        second_pick = None
+        for cand in ["베이지", "아이보리", "브라운", "네이비", "그레이"]:
+            if cand in colors and cand != first_pick:
+                second_pick = cand
+                break
+        picked = [first_pick] + ([second_pick] if second_pick else [])
+        msg = f"{product_name}은 {', '.join(colors)} 쪽으로 보이고요. 출근룩처럼 활용도를 먼저 보시면 {' / '.join(picked)} 쪽이 제일 손이 잘 가요."
+        if first_pick == "블랙":
+            msg += " 블랙은 상의를 고를 때 가장 실패가 적고 전체 인상이 단정하게 정리돼서 제일 무난한 쪽이에요."
+        if second_pick == "베이지":
+            msg += " 베이지는 부드럽고 여성스럽게 보이지만 블랙보다는 관리와 매치에서 조금 더 신경 쓰는 쪽으로 보시면 돼요."
         if upper_heavy:
-            msg += " 상체가 더 도드라져 보이는 걸 피하고 싶으시면 너무 강하게 튀는 색보다는 차분한 톤이 더 안전해요."
+            msg += " 상체가 더 도드라져 보이는 걸 피하고 싶으시면 팬츠는 너무 밝은 톤보다 차분한 톤이 더 안전해요."
         return msg
     return f"{product_name}은 {', '.join(colors)} 쪽으로 보이고요, 고객님 체형 기준으로는 너무 강하게 튀는 색보다 차분한 톤이 더 손이 잘 가실 가능성이 커요."
 
