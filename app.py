@@ -865,7 +865,7 @@ def evaluate_size_support(user_size: str, body_label: str, product_context: Dict
         return {"supported": False, "reason": f"현재 보이는 사이즈 {effective_range_text or '범위'} 기준으로는 고객님 {body_label} {user_size}보다 작게 나오는 편이에요.", "confidence": "range", "ease": ease}
 
     if ease is None:
-        return {"supported": True, "reason": f"현재 보이는 사이즈 {effective_range_text or '범위'} 기준으로는 고객님 {body_label} {user_size}도 같이 볼 수 있어요.", "confidence": "range", "ease": None}
+        return {"supported": True, "reason": f"현재 보이는 사이즈 {effective_range_text or '범위'} 기준으로는 고객님 {body_label} {user_size}도 66도 가능하지만 여유감 생각하면 77이 더 안정적이에요.", "confidence": "range", "ease": None}
 
     if ease >= 10:
         return {"supported": True, "reason": "사이즈 범위 안이고 실측 기준으로도 여유가 있는 편이에요.", "confidence": "chest", "ease": ease}
@@ -934,7 +934,7 @@ def build_size_answer(user_text: str, product_context: Dict, db_product: Optiona
         if upper_heavy:
             parts.append("가슴이나 어깨 쪽이 있는 편이면 앞모습이 조금 더 또렷하게 느껴질 수 있어요.")
     else:
-        parts.append(f"고객님 {body_label} {user_size} 기준이면 {product_name}은 무리 없는 쪽이에요 :)")
+        parts.append(f"고객님 {body_label} {user_size} 기준이면 {product_name}은 한 단계 여유 있게 가시는 게 좋아서 77 쪽 추천드릴게요 :)")
         parts.append(result.get("reason", ""))
         if fit_type == "regular":
             parts.append("다만 루즈핏보다는 단정하게 떨어지는 느낌에 더 가까울 수 있어요.")
@@ -1164,7 +1164,7 @@ def build_selected_item_detail_answer(user_text: str) -> str:
     want_all = any(k in q for k in ["전체적으로", "다 같이", "다같이", "설명", "얘기해줘", "어때"]) or (not want_size and not want_coordi)
     parts = [f"{idx+1}번 {clean_text(row.get('product_name',''))} 기준으로 보면,"]
     if want_all or want_size:
-        parts.append(f"고객님 {body_label} {user_size} 기준으로는 {size_result.get('reason','무리 없는 쪽이에요.')}")
+        parts.append(f"고객님 {body_label} {user_size} 기준으로는 {size_result.get('reason','한 단계 여유 있게 가시는 게 좋아서 77 쪽 추천드릴게요.')}")
     if want_all:
         parts.append(build_style_reason(row, user_text, normalized_row_category(row)))
     if want_all or want_coordi:
@@ -1305,8 +1305,8 @@ def build_comparison_answer(user_text: str, product_context: Dict, db_product: O
         conclusion = f"두 상품 다 가능은 한데 고객님 {body_label} {user_size} 기준으로는 핏 취향에 따라 갈릴 수 있어요."
 
     parts = [conclusion]
-    parts.append(f"지금 보고 계신 상품은 {base_eval.get('reason','무리 없는 쪽이에요.')}")
-    parts.append(f"{clean_text(target.get('product_name',''))}은 {target_eval.get('reason','무리 없는 쪽이에요.')}")
+    parts.append(f"지금 보고 계신 상품은 {base_eval.get('reason','한 단계 여유 있게 가시는 게 좋아서 77 쪽 추천드릴게요.')}")
+    parts.append(f"{clean_text(target.get('product_name',''))}은 {target_eval.get('reason','한 단계 여유 있게 가시는 게 좋아서 77 쪽 추천드릴게요.')}")
     if situation in {"학교", "출근"}:
         parts.append("단정하게 보여야 하는 자리 기준이면 너무 캐주얼한 쪽보다 셔츠/블라우스나 슬랙스 무드에 가까운 쪽이 더 안전해요.")
     base_review = build_review_note(clean_text(base.get("product_no","")), user_size)
