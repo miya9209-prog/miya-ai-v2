@@ -1605,6 +1605,66 @@ def render_message(role: str, content: str):
         unsafe_allow_html=True,
     )
 
+
+# =========================================================
+# 런타임 컨텍스트 부트스트랩
+# =========================================================
+def _qp_value(v):
+    if isinstance(v, list):
+        return clean_text(v[0] if v else "")
+    return clean_text(v)
+
+try:
+    _params = {k: _qp_value(v) for k, v in dict(st.query_params).items()}
+except Exception:
+    _params = {}
+
+if not clean_text(st.session_state.get("customer_name", "")):
+    resolved_name = resolve_customer_name(_params)
+    if resolved_name:
+        st.session_state.customer_name = resolved_name
+if _params.get("customer_id"):
+    st.session_state.customer_id = clean_text(_params.get("customer_id"))
+if _params.get("login_id"):
+    st.session_state.customer_login_id = clean_text(_params.get("login_id"))
+if _params.get("email"):
+    st.session_state.customer_email = clean_text(_params.get("email"))
+
+_product_url = clean_text(_params.get("url", ""))
+_product_no = extract_product_no_from_url(_product_url)
+_passed_name = clean_text(_params.get("product_name", ""))
+
+if _product_url:
+    try:
+        product_context = fetch_product_context(_product_url, passed_name=_passed_name, passed_product_no=_product_no)
+    except Exception:
+        product_context = {
+            "product_no": _product_no,
+            "product_name": _passed_name,
+            "category": "",
+            "size_tip": "",
+            "raw_excerpt": "",
+            "summary": "",
+            "fit": "",
+            "url": _product_url,
+        }
+else:
+    product_context = {
+        "product_no": _product_no,
+        "product_name": _passed_name,
+        "category": "",
+        "size_tip": "",
+        "raw_excerpt": "",
+        "summary": "",
+        "fit": "",
+        "url": _product_url,
+    }
+
+db_product = get_db_product(clean_text(product_context.get("product_no", "")) or _product_no)
+
+if not clean_text(st.session_state.get("last_context_key", "")):
+    st.session_state.last_context_key = clean_text(product_context.get("product_no", "")) or _product_url or "miya-session"
+
 st.markdown('<div class="miya-chat-wrap">', unsafe_allow_html=True)
 for msg in st.session_state.messages:
     render_message(msg.get("role", "assistant"), msg.get("content", ""))
@@ -1613,7 +1673,7 @@ st.markdown('</div>', unsafe_allow_html=True)
 user_input = st.chat_input("메시지를 입력하세요...")
 if user_input:
     st.session_state.messages.append({"role": "user", "content": user_input})
-    write_chat_log("user_message", user_text=user_input, response_mode="user_message", product_context=product_context)
+    write_chat_log("user_message", user_text=user_input, response_mode="user_message", product_context=(product_context if isinstance(product_context, dict) else {}))
     answer = process_user_message(user_input, product_context, db_product)
     st.session_state.messages.append({"role": "assistant", "content": answer})
     st.session_state.last_answer = answer
