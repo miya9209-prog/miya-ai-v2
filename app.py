@@ -403,15 +403,23 @@ def compact_review(product_no: str) -> str:
     return " | ".join(parts[:3])
 
 def model_hint() -> str:
-    models = MODEL_PROFILES.get("models", MODEL_PROFILES if isinstance(MODEL_PROFILES, list) else [])
-    if not models: return ""
+    if isinstance(MODEL_PROFILES, dict):
+        models = MODEL_PROFILES.get("models", [])
+    elif isinstance(MODEL_PROFILES, list):
+        models = MODEL_PROFILES
+    else:
+        models = []
+    if not models:
+        return ""
     vals = []
-    for m in models[:2]: vals.append(f"{m.get('height_cm')}cm/{m.get('weight_kg')}kg")
-    return "상세페이지 모델컷은 " + " 또는 ".join(vals) + " 체형 기준입니다. 모델 이름은 고객에게 말하지 않습니다."
+    for m in models[:2]:
+        if isinstance(m, dict):
+            h = m.get("height_cm", "")
+            w = m.get("weight_kg", "")
+            if h and w:
+                vals.append(f"{h}cm/{w}kg")
+    return "상세페이지 모델컷은 " + " 또는 ".join(vals) + " 체형 기준입니다. 모델 이름은 고객에게 말하지 않습니다." if vals else ""
 
-# =========================================================
-# GPT 호출
-# =========================================================
 def openai_client():
     if OpenAI is None: return None
     key = st.secrets.get("OPENAI_API_KEY", None) if hasattr(st, "secrets") else None
@@ -497,15 +505,26 @@ def call_gpt(user_text: str, current: Dict) -> Optional[str]:
     intent = detect_intent(user_text)
     payload = build_context_payload(intent, user_text, current)
     try:
-        resp = client.chat.completions.create(
-            model=os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"),
-            messages=[
-                {"role":"system", "content": build_system_prompt()},
-                {"role":"user", "content": json.dumps({"user_text": user_text, "context": payload}, ensure_ascii=False)}
-            ],
-            temperature=0.3,
-            max_tokens=520,
-        )
+        model_name = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+        try:
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role":"system", "content": build_system_prompt()},
+                    {"role":"user", "content": json.dumps({"user_text": user_text, "context": payload}, ensure_ascii=False)}
+                ],
+                temperature=0.3,
+                max_tokens=520,
+            )
+        except Exception:
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role":"system", "content": build_system_prompt()},
+                    {"role":"user", "content": json.dumps({"user_text": user_text, "context": payload}, ensure_ascii=False)}
+                ],
+                max_tokens=520,
+            )
         answer = resp.choices[0].message.content.strip()
         return safe_postprocess(answer, payload["customer_call"])
     except Exception as e:
@@ -581,17 +600,24 @@ def maybe_update_selected(user_text: str):
 # =========================================================
 st.markdown("""
 <style>
-.block-container{max-width:760px;padding-top:24px;}
-.miya-title{font-size:26px;font-weight:800;margin-bottom:4px;}
-.miya-sub{color:#777;font-size:14px;margin-bottom:14px;}
-.chat-user{background:#111;color:#fff;border-radius:18px 18px 4px 18px;padding:12px 14px;margin:8px 0 8px auto;max-width:82%;}
-.chat-bot{background:#f5f5f5;color:#111;border-radius:18px 18px 18px 4px;padding:12px 14px;margin:8px auto 8px 0;max-width:86%;line-height:1.55;}
-.label{font-size:12px;color:#888;margin:6px 0 2px;}
+[data-testid="stToolbar"]{visibility:hidden;height:0;position:fixed;}
+#MainMenu{visibility:hidden;}
+footer{visibility:hidden;}
+.block-container{max-width:760px;padding-top:54px;padding-left:18px;padding-right:18px;padding-bottom:90px;}
+.miya-title-wrap{display:flex;align-items:center;gap:8px;margin-bottom:4px;}
+.miya-title{font-size:30px;font-weight:900;letter-spacing:-1.2px;line-height:1.15;color:#1f2937;}
+.miya-title .accent{color:#0f766e;}
+.beta-badge{font-size:11px;background:#0f766e;color:#fff;border-radius:999px;padding:3px 8px;font-weight:700;}
+.miya-sub{color:#666;font-size:14px;margin-bottom:18px;text-align:center;}
+.chat-user{background:#e5f4ef;color:#12423a;border:1px solid #c6ded8;border-radius:18px 18px 4px 18px;padding:12px 14px;margin:8px 0 8px auto;max-width:82%;line-height:1.55;}
+.chat-bot{background:#08245a;color:#fff;border-radius:18px 18px 18px 4px;padding:13px 15px;margin:8px auto 8px 0;max-width:86%;line-height:1.58;}
+.label{font-size:12px;color:#666;margin:8px 0 3px;font-weight:700;}
+.stTextInput input, .stSelectbox div[data-baseweb="select"]{border-radius:12px;}
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="miya-title">미샵 쇼핑친구 미야언니</div>', unsafe_allow_html=True)
-st.markdown('<div class="miya-sub">옷을 같이 봐주는 MD 상담형 챗봇입니다.</div>', unsafe_allow_html=True)
+st.markdown('<div class="miya-title-wrap"><div class="miya-title">미샵 쇼핑친구 <span class="accent">미야언니</span></div><span class="beta-badge">BETA</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="miya-sub">24시간 쇼핑 결정에 도움드리는 스마트한 쇼핑친구</div>', unsafe_allow_html=True)
 
 qp = query_params()
 url = qp.get("url", "") or qp.get("product_url", "")
@@ -605,21 +631,27 @@ if context_key != st.session_state.last_context_key:
     st.session_state.last_recommendations = []
     st.session_state.selected_product = {}
 
-with st.expander("고객 체형 정보", expanded=True):
+with st.expander("사이즈 입력 (더 구체적인 상담 가능)", expanded=True):
+    size_options = ["", "44", "55", "55반", "66", "66반", "77", "77반", "88", "99"]
     c1, c2 = st.columns(2)
     with c1:
         st.session_state.body_height = st.text_input("키", value=st.session_state.body_height, placeholder="cm")
-        st.session_state.body_top = st.text_input("상의", value=st.session_state.body_top, placeholder="예: 66")
     with c2:
         st.session_state.body_weight = st.text_input("체중", value=st.session_state.body_weight, placeholder="kg")
-        st.session_state.body_bottom = st.text_input("하의", value=st.session_state.body_bottom, placeholder="예: 66반")
-    st.session_state.shoe_size = st.text_input("신발", value=st.session_state.shoe_size, placeholder="예: 235")
+    c3, c4 = st.columns(2)
+    with c3:
+        current_top = st.session_state.body_top if st.session_state.body_top in size_options else ""
+        st.session_state.body_top = st.selectbox("상의", size_options, index=size_options.index(current_top), format_func=lambda x: x or "선택")
+    with c4:
+        current_bottom = st.session_state.body_bottom if st.session_state.body_bottom in size_options else ""
+        st.session_state.body_bottom = st.selectbox("하의", size_options, index=size_options.index(current_bottom), format_func=lambda x: x or "선택")
+    st.session_state.shoe_size = st.text_input("신발사이즈(선택)", value=st.session_state.shoe_size, placeholder="예: 235")
 
 st.caption(f"현재 입력 정보: {body_summary()}")
 
 if not st.session_state.messages:
     call = customer_call()
-    st.session_state.messages.append({"role":"assistant", "content":f"안녕하세요 :) {current.get('product_name','지금 보시는 상품')} 같이 봐드릴게요. 궁금한 점 편하게 말씀해 주세요."})
+    st.session_state.messages.append({"role":"assistant", "content":f"안녕하세요 :) {current.get('product_name','지금 보시는 상품')} 같이 봐드릴게요. 사이즈나 코디 고민 편하게 말씀해 주세요."})
 
 for msg in st.session_state.messages:
     if msg["role"] == "user":
