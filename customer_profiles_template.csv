@@ -1,3 +1,2 @@
 customer_id,login_id,email,name
-1001,test01,test01@example.com,김지은
-1002,test02,test02@example.com,박수진
+1001,testuser,test@example.com,홍길동
