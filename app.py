@@ -17,7 +17,7 @@ try:
 except Exception:
     OpenAI = None
 
-st.set_page_config(page_title="미야언니", layout="centered", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="픽톡", layout="centered", initial_sidebar_state="collapsed")
 
 # =========================================================
 # 기본 설정
@@ -85,13 +85,13 @@ def detect_category(text: str) -> str:
     if any(w in c for w in SHOE_WORDS): return "신발"
     if any(w in c for w in BAG_WORDS): return "가방"
     if any(w in c for w in ACC_WORDS): return "악세사리"
-    if "블라우스" in c: return "블라우스"
+    if any(w in c for w in ["블라우스", "블라우스/셔츠"]): return "블라우스"
     if "셔츠" in c and "셔츠 자켓" not in c: return "셔츠"
     if "맨투맨" in c: return "맨투맨"
-    if "티셔츠" in c: return "티셔츠"
+    if "티셔츠" in c or "티" in c: return "티셔츠"
     if "가디건" in c: return "가디건"
     if "니트" in c: return "니트"
-    if any(w in c for w in ["자켓", "재킷", "점퍼", "코트", "조끼", "베스트"]): return "자켓"
+    if any(w in c for w in ["자켓", "재킷", "점퍼", "코트", "조끼", "베스트", "아우터"]): return "자켓"
     if any(w in c for w in ["팬츠", "슬랙스", "바지", "데님", "청바지"]): return "팬츠"
     if any(w in c for w in ["스커트", "치마"]): return "스커트"
     return "기타"
@@ -301,11 +301,15 @@ def detect_intent(user_text: str) -> str:
 # =========================================================
 def target_category_from_text(text: str, current_category: str = "") -> str:
     q = clean_text(text)
-    if any(k in q for k in ["슬랙스", "팬츠", "바지", "데님", "청바지"]): return "팬츠"
+    if any(k in q for k in ["자켓", "재킷", "아우터", "코트", "점퍼", "가디건"]):
+        if "가디건" in q:
+            return "니트"
+        return "자켓"
     if any(k in q for k in ["블라우스"]): return "블라우스"
     if any(k in q for k in ["셔츠"]): return "셔츠"
     if any(k in q for k in ["니트", "가디건"]): return "니트"
-    if any(k in q for k in ["자켓", "재킷", "아우터", "코트"]): return "자켓"
+    if any(k in q for k in ["상의", "탑", "티셔츠"]): return "블라우스"
+    if any(k in q for k in ["슬랙스", "팬츠", "바지", "데님", "청바지"]): return "팬츠"
     if any(k in q for k in SHOE_WORDS): return "신발"
     if any(k in q for k in BAG_WORDS): return "가방"
     if any(k in q for k in ACC_WORDS): return "악세사리"
@@ -332,7 +336,42 @@ def parse_size_range(text: str) -> Tuple[Optional[int], Optional[int]]:
     return (min(found), max(found)) if found else (None, None)
 
 def row_category(row: Dict) -> str:
-    return detect_category(f"{row.get('product_name','')} {row.get('category','')} {row.get('sub_category','')}")
+    return detect_category(f"{row.get('category','')} {row.get('sub_category','')} {row.get('product_name','')}")
+
+def row_category_matches(row: Dict, target_cat: str) -> bool:
+    cat_blob = clean_text(f"{row.get('category','')} {row.get('sub_category','')} {row.get('product_name','')}")
+    cat = row_category(row)
+    if not target_cat or target_cat == "기타":
+        return True
+    if target_cat == "블라우스":
+        return cat in ["블라우스", "셔츠"] or any(k in cat_blob for k in ["블라우스", "셔츠", "블라우스/셔츠"])
+    if target_cat == "셔츠":
+        return cat in ["블라우스", "셔츠"] or "셔츠" in cat_blob
+    if target_cat == "니트":
+        return cat in ["니트", "가디건"] or any(k in cat_blob for k in ["니트", "가디건"])
+    if target_cat == "자켓":
+        return cat == "자켓" or any(k in cat_blob for k in ["자켓", "재킷", "점퍼", "코트", "조끼", "베스트", "아우터"])
+    if target_cat == "팬츠":
+        return cat == "팬츠" or any(k in cat_blob for k in ["팬츠", "슬랙스", "바지", "데님", "청바지"])
+    return cat == target_cat or target_cat in cat_blob
+
+def product_reason_from_row(row: Dict, intent: str, user_text: str) -> str:
+    name = clean_text(row.get("product_name", ""))
+    blob = clean_text(f"{name} {row.get('product_summary','')} {row.get('fit_type','')} {row.get('body_cover_features','')} {row.get('style_tags','')} {row.get('fabric','')}")
+    if any(k in user_text for k in ["출근", "회사", "오피스"]):
+        if any(k in blob for k in ["셔츠", "블라우스"]):
+            return "출근룩에 받쳐 입기 좋은 단정한 분위기예요"
+        if any(k in blob for k in ["자켓", "재킷", "아우터"]):
+            return "전체 코디를 깔끔하게 잡아주는 출근용 아우터로 좋아요"
+    if any(k in blob for k in ["핀턱", "배기", "와이드", "여유"]):
+        return "복부나 힙 라인을 너무 드러내지 않고 편하게 정리해줘요"
+    if any(k in blob for k in ["셔츠", "블라우스"]):
+        return "팬츠와 매치했을 때 단정하고 깔끔하게 이어져요"
+    if any(k in blob for k in ["자켓", "재킷"]):
+        return "출근룩이나 모임룩에 단정한 외출 느낌을 더해줘요"
+    if any(k in blob for k in ["가디건", "니트"]):
+        return "부드럽게 걸치기 좋아 과하지 않은 데일리 코디에 좋아요"
+    return clean_text(row.get("product_summary", ""))[:60] or "데일리로 무난하게 활용하기 좋아요"
 
 def find_candidates(intent: str, user_text: str, current: Dict, limit: int = 5) -> List[Dict]:
     current_cat = current.get("category", "기타")
@@ -350,12 +389,11 @@ def find_candidates(intent: str, user_text: str, current: Dict, limit: int = 5) 
         pno = normalize_product_no(row.get("product_no", ""))
         if current_no and pno == current_no: continue
         cat = row_category(row)
-        if target_cat and target_cat != "기타":
-            if target_cat == "니트" and cat not in ["니트", "가디건"]: continue
-            elif target_cat != "니트" and cat != target_cat: continue
+        if target_cat and target_cat != "기타" and not row_category_matches(row, target_cat):
+            continue
         if not size_ok_for_user(row, cat): continue
         sc = 1
-        blob = f"{row.get('product_name','')} {row.get('style_tags','')} {row.get('body_cover_features','')} {row.get('product_summary','')}"
+        blob = f"{row.get('product_name','')} {row.get('category','')} {row.get('sub_category','')} {row.get('style_tags','')} {row.get('body_cover_features','')} {row.get('product_summary','')} {row.get('fabric','')}"
         for t in tokens(q):
             if t in blob: sc += 1
         if any(k in q for k in ["출근", "학교", "상담", "단정"]):
@@ -435,8 +473,8 @@ def build_system_prompt() -> str:
 1. 고객 질문에 바로 답한다. '사이즈/코디/비교/컬러 중 무엇을 볼까요?' 같은 메뉴형 질문을 하지 않는다.
 2. 결론을 먼저 말하고, 이유를 짧게 붙인다.
 3. 상품DB/리뷰/모델정보는 근거로만 사용한다. 'DB 기준', '상품정보상' 같은 말은 절대 쓰지 않는다.
-4. 추천 상품은 allowed_candidates 안에 있는 상품명만 말한다. 없는 상품명을 만들지 않는다.
-5. 현재 상품과 선택 상품을 구분한다. '비슷한 다른 상품'은 대체재 추천이고, '어울리는'은 코디 추천이다.
+4. 추천 상품 요청이면 allowed_candidates 안에서 2~3개를 반드시 번호 리스트로 제안한다. 없는 상품명을 만들지 않는다. allowed_candidates가 있으면 '추천 가능한 상품이 없다'고 말하지 않는다.
+5. 현재 상품과 선택 상품을 구분한다. '비슷한 다른 상품'은 대체재 추천이고, '어울리는/같이 입을/코디/상의/아우터'는 코디 추천이다.
 6. 66/77 같은 권장사이즈와 가슴둘레 실측을 혼동하지 않는다. 권장사이즈는 가능 여부, 실측은 핏 체감 설명에만 쓴다.
 7. 고객 이름이 있으면 자연스럽게 이름+님으로 부른다. 없으면 고객님이라고 한다.
 8. 모델 이름은 말하지 않는다. 필요하면 '상세페이지 모델컷 기준'으로만 말한다.
@@ -475,6 +513,7 @@ def build_context_payload(intent: str, user_text: str, current: Dict) -> Dict:
             "fit_type": row.get("fit_type", ""),
             "summary": row.get("product_summary", "")[:220],
             "body_cover": row.get("body_cover_features", "")[:160],
+            "reason": product_reason_from_row(row, intent, user_text),
             "review": compact_review(row.get("product_no", "")),
         })
     return {
@@ -490,6 +529,17 @@ def build_context_payload(intent: str, user_text: str, current: Dict) -> Dict:
             "fit": current.get("fit", "") or product_db.get("fit_type", ""),
             "summary": current.get("summary", "")[:450] or product_db.get("product_summary", "")[:450],
             "colors": current.get("colors", "") or product_db.get("color_options", ""),
+            "measurements": {
+                "shoulder": product_db.get("shoulder", ""),
+                "chest": product_db.get("chest", ""),
+                "waist": product_db.get("waist", ""),
+                "hip": product_db.get("hip", ""),
+                "rise": product_db.get("rise", ""),
+                "thigh": product_db.get("thigh", ""),
+                "hem": product_db.get("hem", ""),
+                "length": product_db.get("length", ""),
+                "raw_measurements": product_db.get("raw_measurements", ""),
+            },
             "review": compact_review(current.get("product_no", "")),
         },
         "selected_product": selected,
@@ -633,7 +683,7 @@ def fallback_answer(user_text: str, current: Dict) -> str:
             st.session_state.last_recommendations = cands
             lines = [f"{call}, 지금 보시는 {name}과 비슷한 무드에서 대안으로 볼 만한 상품을 골라드릴게요."]
             for i, row in enumerate(cands, 1):
-                lines.append(f"{i}. {row.get('product_name')} — {row.get('size_range','')} / {clean_text(row.get('fit_type','')) or '깔끔한 데일리핏'}")
+                lines.append(f"{i}. {row.get('product_name')} — {row.get('size_range','')} / {product_reason_from_row(row, intent, user_text)}")
             return "\n".join(lines)
         return f"{call}, 비슷한 대안 상품을 바로 많이 잡지는 못했어요. 그래도 같은 카테고리 안에서 더 여유 있는 쪽으로 다시 골라드릴게요."
     if intent == "coordi_recommend":
@@ -642,7 +692,7 @@ def fallback_answer(user_text: str, current: Dict) -> str:
             st.session_state.last_recommendations = cands
             lines = [f"{call}, {name} 기준으로 같이 입기 좋은 쪽으로 골라드릴게요."]
             for i, row in enumerate(cands, 1):
-                lines.append(f"{i}. {row.get('product_name')} — {row.get('size_range','')} / 코디가 깔끔하게 정리되는 쪽이에요")
+                lines.append(f"{i}. {row.get('product_name')} — {row.get('size_range','')} / {product_reason_from_row(row, intent, user_text)}")
             return "\n".join(lines)
         return f"{call}, {name}에는 너무 캐주얼한 것보다 깔끔한 슬랙스나 블라우스 계열이 안정적이에요."
     if intent == "color":
@@ -690,7 +740,7 @@ footer{visibility:hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="miya-title-wrap"><div class="miya-title">미샵 쇼핑친구 <span class="accent">미야언니</span></div><span class="beta-badge">BETA</span></div>', unsafe_allow_html=True)
+st.markdown('<div class="miya-title-wrap"><div class="miya-title">미샵 쇼핑친구 <span class="accent">픽톡</span></div><span class="beta-badge">BETA</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="miya-sub">24시간 쇼핑 결정에 도움드리는 스마트한 쇼핑친구</div>', unsafe_allow_html=True)
 
 qp = query_params()
