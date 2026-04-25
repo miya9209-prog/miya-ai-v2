@@ -473,7 +473,7 @@ def build_system_prompt() -> str:
 1. 고객 질문에 바로 답한다. '사이즈/코디/비교/컬러 중 무엇을 볼까요?' 같은 메뉴형 질문을 하지 않는다.
 2. 결론을 먼저 말하고, 이유를 짧게 붙인다.
 3. 상품DB/리뷰/모델정보는 근거로만 사용한다. 'DB 기준', '상품정보상' 같은 말은 절대 쓰지 않는다.
-4. 추천 상품 요청이면 allowed_candidates 안에서 2~3개를 반드시 번호 리스트로 제안한다. 없는 상품명을 만들지 않는다. allowed_candidates가 있으면 '추천 가능한 상품이 없다'고 말하지 않는다.
+4. 추천 상품의 번호 리스트와 링크는 시스템이 별도로 출력한다. 너는 리스트를 직접 만들지 말고, 후보의 성격을 바탕으로 설명만 한다. 없는 상품명을 만들지 않는다. allowed_candidates가 있으면 '추천 가능한 상품이 없다'고 말하지 않는다.
 5. 현재 상품과 선택 상품을 구분한다. '비슷한 다른 상품'은 대체재 추천이고, '어울리는/같이 입을/코디/상의/아우터'는 코디 추천이다.
 6. 66/77 같은 권장사이즈와 실측을 혼동하지 않는다. 권장사이즈는 가능 여부, 실측은 핏 체감 설명에만 쓴다. 배기/세미배기/와이드/부츠컷/일자/라글란/롱/하프 같은 상품 실루엣 특성을 고객 체형 고민과 반드시 연결해서 설명한다.
 7. 고객 이름이 있으면 자연스럽게 이름+님으로 부른다. 없으면 고객님이라고 한다.
@@ -735,6 +735,188 @@ def product_aware_fit_answer(user_text: str, current: Dict) -> str:
     return ""
 
 
+
+# =========================================================
+# 하이브리드 추천 안정화
+# - 코드: DB 후보 검색 / 상품명 / 링크 / 번호 형식 통제
+# - GPT: 후보 중 우선순위 판단 / 고객 체형·상황 기반 추천 이유 작성
+# =========================================================
+def product_link(row: Dict) -> str:
+    url = clean_text(row.get("product_url", ""))
+    if url:
+        return url
+    pno = normalize_product_no(row.get("product_no", ""))
+    if pno:
+        return f"https://www.misharp.co.kr/product/detail.html?product_no={pno}"
+    return ""
+
+def strip_numbered_list_from_gpt(text: str) -> str:
+    ans = clean_text(text)
+    ans = re.sub(r"(^|\s)(\d+)\s*[\.\)]\s*[^.?!요]{0,80}", " ", ans)
+    ans = re.sub(r"\d+\s*번\s*", "", ans)
+    ans = re.sub(r"\s+", " ", ans).strip()
+    return ans
+
+def recommendation_heading(intent: str, user_text: str, current: Dict) -> str:
+    q = clean_text(user_text)
+    current_name = current.get("product_name", "지금 보시는 상품")
+    if intent == "alternative_recommend":
+        return f"{current_name}과 비슷한 무드에서 대안으로 볼 만한 상품이에요."
+    if any(k in q for k in ["블라우스", "셔츠", "상의"]):
+        return "출근룩으로 같이 입기 좋은 상의 쪽으로 골라드릴게요."
+    if any(k in q for k in ["자켓", "재킷", "아우터", "가디건"]):
+        return "함께 걸치기 좋은 아우터 쪽으로 골라드릴게요."
+    if any(k in q for k in ["신발", "슈즈", "로퍼", "힐"]):
+        return "이 코디에 맞는 신발 쪽으로 골라드릴게요."
+    if any(k in q for k in ["가방", "백"]):
+        return "전체 분위기에 맞는 가방 쪽으로 골라드릴게요."
+    return "같이 입기 좋은 상품으로 골라드릴게요."
+
+def fallback_reason_for_candidate(row: Dict, intent: str, user_text: str) -> str:
+    return product_reason_from_row(row, intent, user_text)
+
+def rank_candidates_with_gpt(user_text: str, current: Dict, intent: str, candidates: List[Dict]) -> List[Dict]:
+    """
+    GPT가 후보를 새로 만들지 않고, 코드가 준 candidate_id 중에서만 TOP3를 고르게 합니다.
+    반환 형식:
+    [{"candidate_id": 1, "reason": "..."}]
+    """
+    client = openai_client()
+    if client is None or not candidates:
+        return []
+
+    candidate_payload = []
+    for i, row in enumerate(candidates[:8], 1):
+        candidate_payload.append({
+            "candidate_id": i,
+            "product_name": clean_text(row.get("product_name", "")),
+            "category": row_category(row),
+            "size_range": clean_text(row.get("size_range", "")),
+            "fit_type": clean_text(row.get("fit_type", "")),
+            "summary": clean_text(row.get("product_summary", ""))[:180],
+            "body_cover": clean_text(row.get("body_cover_features", ""))[:120],
+            "style_tags": clean_text(row.get("style_tags", ""))[:100],
+            "review": compact_review(row.get("product_no", "")),
+        })
+
+    payload = {
+        "user_text": user_text,
+        "intent": intent,
+        "customer_body": body_context(),
+        "current_product": {
+            "product_name": current.get("product_name", ""),
+            "category": current.get("category", ""),
+            "summary": current.get("summary", "")[:220],
+            "fit": current.get("fit", ""),
+            "colors": current.get("colors", ""),
+        },
+        "candidate_products": candidate_payload,
+        "rule": "candidate_id 안에서만 3개를 고르고, 각 상품 추천 이유를 1문장으로 작성하세요. 상품명을 새로 만들지 마세요. 번호는 candidate_id만 사용하세요."
+    }
+
+    system = """
+너는 4050 여성 패션 MD다.
+사용자가 원하는 코디/대체상품 목적에 맞춰 후보 상품 중 TOP3만 고른다.
+반드시 제공된 candidate_id 중에서만 선택한다.
+없는 상품명, 없는 번호, candidate_id 밖의 번호를 만들지 않는다.
+응답은 JSON만 출력한다.
+형식:
+{"picks":[{"candidate_id":1,"reason":"추천 이유 1문장"},{"candidate_id":2,"reason":"추천 이유 1문장"},{"candidate_id":3,"reason":"추천 이유 1문장"}]}
+""".strip()
+
+    try:
+        model_name = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+        try:
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}
+                ],
+                temperature=0.2,
+                max_tokens=420,
+            )
+        except Exception:
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)}
+                ],
+                max_tokens=420,
+            )
+        raw = resp.choices[0].message.content.strip()
+        # JSON 앞뒤 잡음 방지
+        m = re.search(r"\{.*\}", raw, re.S)
+        if not m:
+            return []
+        data = json.loads(m.group(0))
+        picks = data.get("picks", [])
+        if not isinstance(picks, list):
+            return []
+        cleaned = []
+        used = set()
+        for p in picks:
+            try:
+                cid = int(p.get("candidate_id"))
+            except Exception:
+                continue
+            if cid < 1 or cid > len(candidates[:8]) or cid in used:
+                continue
+            used.add(cid)
+            reason = clean_text(p.get("reason", ""))
+            row = dict(candidates[cid-1])
+            row["_gpt_reason"] = reason
+            cleaned.append(row)
+            if len(cleaned) >= 3:
+                break
+        return cleaned
+    except Exception as e:
+        st.session_state.last_error = f"rank_candidates_with_gpt: {e}"
+        return []
+
+def markdown_product_line(i: int, row: Dict) -> str:
+    name = clean_text(row.get("product_name", "")) or "추천 상품"
+    url = product_link(row)
+    size = clean_text(row.get("size_range", ""))
+    reason = clean_text(row.get("_gpt_reason", "")) or fallback_reason_for_candidate(row, "coordi_recommend", "")
+    size_part = f" ({size})" if size else ""
+    if url:
+        return f"{i}. [{name}]({url}){size_part} — {reason}"
+    return f"{i}. {name}{size_part} — {reason}"
+
+def build_recommendation_answer(user_text: str, current: Dict) -> str:
+    intent = detect_intent(user_text)
+    if intent not in ["coordi_recommend", "alternative_recommend"]:
+        return ""
+
+    # 후보는 넉넉히 뽑고, GPT가 그 안에서 TOP3를 고르게 함
+    raw_candidates = find_candidates(intent, user_text, current, limit=8)
+    if not raw_candidates:
+        return ""
+
+    ranked = rank_candidates_with_gpt(user_text, current, intent, raw_candidates)
+    candidates = ranked if ranked else raw_candidates[:3]
+
+    st.session_state.last_recommendations = candidates[:3]
+
+    lines = [recommendation_heading(intent, user_text, current)]
+    for i, row in enumerate(candidates[:3], 1):
+        lines.append(markdown_product_line(i, row))
+
+    q = clean_text(user_text)
+    if any(k in q for k in ["출근", "회사", "오피스"]):
+        tail = "위 상품들은 출근룩 기준으로 너무 캐주얼하지 않고, 팬츠와 같이 입었을 때 전체 분위기가 단정하게 정리되는 쪽이에요."
+    elif any(k in q for k in ["검정", "블랙"]):
+        tail = "블랙 팬츠와 맞출 때는 상의나 아우터가 너무 무겁지 않게 정리되는 쪽이 좋아서, 밝은 톤이나 차분한 기본 컬러 위주로 보시면 실패가 적어요."
+    elif intent == "alternative_recommend":
+        tail = "비슷한 느낌 안에서 비교하실 때는 핏 여유, 총장, 허리·힙 실측을 같이 보시면 선택이 더 정확해요."
+    else:
+        tail = "마음 가는 번호를 말씀해주시면 그 상품 기준으로 사이즈감과 코디까지 이어서 봐드릴게요."
+
+    return "\n".join(lines + [tail])
+
+
 def call_gpt(user_text: str, current: Dict) -> Optional[str]:
     client = openai_client()
     if client is None: return None
@@ -902,7 +1084,15 @@ user_input = st.chat_input("궁금한 점을 입력하세요")
 if user_input:
     maybe_update_selected(user_input)
     st.session_state.messages.append({"role":"user", "content":user_input})
-    answer = fast_answer(user_input, current)
+    answer = ""
+    intent = detect_intent(user_input)
+
+    # 추천/코디/대체상품은 번호와 상품 링크가 꼬이지 않도록 코드가 직접 리스트를 만듭니다.
+    if intent in ["coordi_recommend", "alternative_recommend"]:
+        answer = build_recommendation_answer(user_input, current)
+
+    if not answer:
+        answer = fast_answer(user_input, current)
     if not answer:
         answer = call_gpt(user_input, current)
     if not answer or len(clean_text(answer)) < 10:
