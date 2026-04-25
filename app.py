@@ -499,6 +499,80 @@ def build_context_payload(intent: str, user_text: str, current: Dict) -> Dict:
         "situation_context": st.session_state.situation_context,
     }
 
+
+# =========================================================
+# 빠른 응답: 자주 나오는 사이즈/체형 질문은 GPT 호출 전에 즉시 처리
+# =========================================================
+def particle_eun_neun(name: str) -> str:
+    name = clean_text(name) or "상품"
+    last = name[-1]
+    try:
+        code = ord(last) - ord("가")
+        has_jong = 0 <= code <= 11171 and (code % 28) != 0
+        return f"{name}{'은' if has_jong else '는'}"
+    except Exception:
+        return f"{name}은"
+
+def fast_size_option_answer(user_text: str, current: Dict) -> str:
+    q = clean_text(user_text)
+    q_low = q.lower()
+
+    # M/L, 미디움/라지, 사이즈 선택 질문
+    size_option_words = ["m", "l", "라지", "미디움", "medium", "large", "사이즈", "뭘로", "고르면", "선택", "나을"]
+    if not any(w in q_low for w in size_option_words):
+        return ""
+
+    name = current.get("product_name") or "지금 보시는 상품"
+    cat_text = f"{current.get('category','')} {name}"
+    is_bottom = any(k in cat_text for k in ["슬랙스", "팬츠", "바지", "데님", "스커트", "치마"])
+    base_size = st.session_state.get("body_bottom", "") if is_bottom else st.session_state.get("body_top", "")
+    has_hip = any(k in q for k in ["힙", "골반", "허벅지", "하체"])
+
+    # 66반 하의 고객이 M/L을 묻는 가장 빈번한 케이스
+    if base_size == "66반" or "66반" in q:
+        if has_hip:
+            return f"{base_size or '66반'}에 힙이 있는 편이시면 {particle_eun_neun(name)} M보다는 L 쪽이 더 안전해요. 힙이나 허벅지에서 당기는 느낌이 나면 전체 실루엣이 덜 예뻐질 수 있거든요. 허리는 조금 여유 있을 수 있지만, 편하게 입고 실패 줄이려면 L을 먼저 추천드릴게요."
+        return f"{base_size or '66반'} 기준이면 {particle_eun_neun(name)} M은 깔끔하게 맞는 쪽, L은 조금 더 편한 쪽으로 보시면 좋아요. 편하게 입으실 거면 L, 딱 떨어지는 핏을 원하시면 M 쪽이에요."
+
+    if base_size in ["77", "77반", "88"]:
+        return f"{base_size} 기준이면 {particle_eun_neun(name)} 가능 옵션 중에서는 큰 쪽을 먼저 보시는 게 안전해요. 특히 힙이나 허벅지가 있는 편이면 작은 사이즈는 앉거나 움직일 때 답답하게 느껴질 수 있어요."
+
+    if base_size in ["55", "55반", "66"]:
+        if has_hip:
+            return f"{base_size} 기준이면 {particle_eun_neun(name)} 기본 사이즈도 가능해 보이지만, 힙이나 허벅지가 신경 쓰이면 한 사이즈 여유 있게 보시는 게 더 편해요."
+        return f"{base_size} 기준이면 {particle_eun_neun(name)} 기본 사이즈 쪽부터 보셔도 괜찮아요. 다만 편한 핏을 원하시면 한 사이즈 여유 있게 보는 쪽도 좋습니다."
+
+    return ""
+
+def fast_body_fit_answer(user_text: str, current: Dict) -> str:
+    q = clean_text(user_text)
+    if not any(k in q for k in ["힙", "골반", "허벅지", "하체", "다리 짧", "다리가 짧", "키가 작"]):
+        return ""
+
+    name = current.get("product_name") or "지금 보시는 상품"
+    bottom = st.session_state.get("body_bottom", "")
+
+    if any(k in q for k in ["힙", "골반", "허벅지", "하체"]):
+        if bottom in ["66반", "77", "77반", "88"]:
+            return f"{bottom}에 힙이 있는 편이시면 {particle_eun_neun(name)} 사이즈 선택을 조금 여유 있게 보시는 게 좋아요. 너무 딱 맞게 고르면 힙 쪽이 먼저 당겨 보여서 핏이 덜 예쁠 수 있거든요. 편하게 예쁜 실루엣을 원하시면 가능한 옵션 중 큰 쪽을 먼저 추천드릴게요."
+        return f"{particle_eun_neun(name)} 힙 라인이 신경 쓰이는 분들은 너무 딱 맞게보다 살짝 여유 있게 고르는 쪽이 예뻐요. 하의 사이즈와 옵션을 같이 보면 더 정확하게 잡아드릴 수 있어요."
+
+    if any(k in q for k in ["다리 짧", "다리가 짧", "키가 작"]):
+        return f"{particle_eun_neun(name)} 다리 비율이 걱정되시면 길이와 밑단 라인이 중요해요. 너무 애매하게 끊기는 기장보다 발등 가까이 자연스럽게 떨어지는 쪽이 다리가 더 길어 보여요. 옵션이 있다면 전체 비율이 깔끔하게 이어지는 쪽을 먼저 보시는 게 좋아요."
+
+    return ""
+
+def fast_answer(user_text: str, current: Dict) -> str:
+    for fn in (fast_size_option_answer, fast_body_fit_answer):
+        try:
+            ans = fn(user_text, current)
+            if ans:
+                return safe_postprocess(ans, customer_call())
+        except Exception:
+            pass
+    return ""
+
+
 def call_gpt(user_text: str, current: Dict) -> Optional[str]:
     client = openai_client()
     if client is None: return None
@@ -604,8 +678,8 @@ st.markdown("""
 #MainMenu{visibility:hidden;}
 footer{visibility:hidden;}
 .block-container{max-width:760px;padding-top:54px;padding-left:18px;padding-right:18px;padding-bottom:90px;}
-.miya-title-wrap{display:flex;align-items:center;gap:8px;margin-bottom:4px;}
-.miya-title{font-size:30px;font-weight:900;letter-spacing:-1.2px;line-height:1.15;color:#1f2937;}
+.miya-title-wrap{display:flex;align-items:center;justify-content:center;gap:8px;margin-bottom:4px;text-align:center;}
+.miya-title{font-size:30px;font-weight:900;letter-spacing:-1.2px;line-height:1.15;color:#1f2937;text-align:center;}
 .miya-title .accent{color:#0f766e;}
 .beta-badge{font-size:11px;background:#0f766e;color:#fff;border-radius:999px;padding:3px 8px;font-weight:700;}
 .miya-sub{color:#666;font-size:14px;margin-bottom:18px;text-align:center;}
@@ -663,7 +737,11 @@ user_input = st.chat_input("궁금한 점을 입력하세요")
 if user_input:
     maybe_update_selected(user_input)
     st.session_state.messages.append({"role":"user", "content":user_input})
-    answer = call_gpt(user_input, current) or fallback_answer(user_input, current)
+    answer = fast_answer(user_input, current)
+    if not answer:
+        answer = call_gpt(user_input, current)
+    if not answer or len(clean_text(answer)) < 10:
+        answer = fallback_answer(user_input, current)
     answer = safe_postprocess(answer, customer_call())
     st.session_state.messages.append({"role":"assistant", "content":answer})
     st.rerun()
