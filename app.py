@@ -475,10 +475,10 @@ def build_system_prompt() -> str:
 3. 상품DB/리뷰/모델정보는 근거로만 사용한다. 'DB 기준', '상품정보상' 같은 말은 절대 쓰지 않는다.
 4. 추천 상품 요청이면 allowed_candidates 안에서 2~3개를 반드시 번호 리스트로 제안한다. 없는 상품명을 만들지 않는다. allowed_candidates가 있으면 '추천 가능한 상품이 없다'고 말하지 않는다.
 5. 현재 상품과 선택 상품을 구분한다. '비슷한 다른 상품'은 대체재 추천이고, '어울리는/같이 입을/코디/상의/아우터'는 코디 추천이다.
-6. 66/77 같은 권장사이즈와 가슴둘레 실측을 혼동하지 않는다. 권장사이즈는 가능 여부, 실측은 핏 체감 설명에만 쓴다.
+6. 66/77 같은 권장사이즈와 실측을 혼동하지 않는다. 권장사이즈는 가능 여부, 실측은 핏 체감 설명에만 쓴다. 배기/세미배기/와이드/부츠컷/일자/라글란/롱/하프 같은 상품 실루엣 특성을 고객 체형 고민과 반드시 연결해서 설명한다.
 7. 고객 이름이 있으면 자연스럽게 이름+님으로 부른다. 없으면 고객님이라고 한다.
 8. 모델 이름은 말하지 않는다. 필요하면 '상세페이지 모델컷 기준'으로만 말한다.
-9. 반복 문장을 피하고, 3~6문장으로 답한다.
+9. 반복 문장을 피하고, 3~6문장으로 답한다. 사이즈/길이 상담 마지막에는 자연스럽게 '평소 즐겨 입는 팬츠 길이·허리·힙 실측과 비교하면 가장 정확하다'는 식의 선택 기준을 제안한다.
 10. 금지 표현: {', '.join(FORBIDDEN_PHRASES)}
 
 답변 톤:
@@ -613,6 +613,14 @@ def fast_body_fit_answer(user_text: str, current: Dict) -> str:
     return ""
 
 def fast_answer(user_text: str, current: Dict) -> str:
+    # 상품 특성 기반 핏 상담을 가장 먼저 적용합니다.
+    try:
+        ans = product_aware_fit_answer(user_text, current)
+        if ans:
+            return safe_postprocess(ans, customer_call())
+    except Exception:
+        pass
+
     for fn in (fast_size_option_answer, fast_body_fit_answer):
         try:
             ans = fn(user_text, current)
@@ -620,6 +628,110 @@ def fast_answer(user_text: str, current: Dict) -> str:
                 return safe_postprocess(ans, customer_call())
         except Exception:
             pass
+    return ""
+
+
+# =========================================================
+# 상품 특성 기반 핏 상담 로직
+# =========================================================
+def current_product_blob(current: Dict) -> str:
+    db = current.get("db") or get_db_product(current.get("product_no", "")) or {}
+    return clean_text(" ".join([
+        current.get("product_name", ""),
+        current.get("category", ""),
+        current.get("summary", ""),
+        current.get("fit", ""),
+        current.get("size_range", ""),
+        current.get("crawl_text", ""),
+        db.get("product_name", ""),
+        db.get("product_summary", ""),
+        db.get("fit_type", ""),
+        db.get("body_cover_features", ""),
+        db.get("style_tags", ""),
+        db.get("fabric", ""),
+        db.get("raw_measurements", ""),
+    ]))
+
+def detect_silhouette(current: Dict) -> Dict:
+    blob = current_product_blob(current)
+    name = clean_text(current.get("product_name", ""))
+    flags = {
+        "semi_baggy": any(k in blob for k in ["세미 배기", "세미배기", "소프트 배기", "배기핏", "배기"]),
+        "wide": any(k in blob for k in ["와이드", "통바지", "넓은"]),
+        "bootcut": any(k in blob for k in ["부츠컷", "세미 부츠"]),
+        "straight": any(k in blob for k in ["일자", "스트레이트"]),
+        "short_length": any(k in blob for k in ["발목", "크롭", "앵클", "9부", "짧게", "짧은", "세미"]),
+        "long_length": any(k in blob for k in ["롱", "풀렝스", "길게", "맥시"]),
+        "pin_tuck": any(k in blob for k in ["핀턱", "턱"]),
+        "raglan": any(k in blob for k in ["라글란"]),
+        "half_length_top": any(k in blob for k in ["하프", "힙을 덮", "힙 덮", "롱셔츠"]),
+    }
+    return flags
+
+def measurement_value(current: Dict, keys: list) -> str:
+    db = current.get("db") or get_db_product(current.get("product_no", "")) or {}
+    for k in keys:
+        v = clean_text(db.get(k, ""))
+        if v:
+            return v
+    raw = clean_text(db.get("raw_measurements", ""))
+    if raw:
+        for k in keys:
+            m = re.search(k + r"[^0-9]{0,8}([0-9]+(?:\.[0-9]+)?)", raw)
+            if m:
+                return m.group(1)
+    return ""
+
+def product_aware_fit_answer(user_text: str, current: Dict) -> str:
+    q = clean_text(user_text)
+    if not any(k in q for k in ["힙", "골반", "허벅지", "하체", "다리", "짧", "키", "길이", "사이즈", "고르면", "맞을까", "어울릴까"]):
+        return ""
+
+    name = current.get("product_name", "지금 보시는 상품")
+    flags = detect_silhouette(current)
+    bottom = st.session_state.get("body_bottom", "")
+    height = st.session_state.get("body_height", "")
+    length = measurement_value(current, ["length", "총장", "기장"])
+    waist = measurement_value(current, ["waist", "허리"])
+    hip = measurement_value(current, ["hip", "힙"])
+    thigh = measurement_value(current, ["thigh", "허벅지"])
+
+    # 힙/허벅지 고민: 배기/세미배기/와이드는 정사이즈 우선 판단
+    if any(k in q for k in ["힙", "골반", "허벅지", "하체"]):
+        if flags["semi_baggy"] or flags["wide"] or flags["pin_tuck"]:
+            details = []
+            if hip: details.append(f"힙 {hip}")
+            if thigh: details.append(f"허벅지 {thigh}")
+            if waist: details.append(f"허리 {waist}")
+            detail_text = f" 실측은 {' / '.join(details)} 정도라," if details else ""
+            return (
+                f"{bottom or '입력하신 하의 사이즈'} 기준으로 보면 {particle_eun_neun(name)} 오히려 힙이나 하체가 신경 쓰이는 분께 잘 맞는 타입이에요. "
+                f"세미 배기나 핀턱 계열은 힙을 붙여서 드러내기보다 여유 있게 떨어져서, 힙이 있으셔도 부담을 덜어주는 쪽이거든요."
+                f"{detail_text} 평소 즐겨 입으시는 팬츠의 허리·힙·허벅지 실측과 비교해보시면 가장 정확해요. "
+                f"너무 타이트하게 입는 걸 좋아하지 않으시면 정사이즈를 먼저 보시고, 허리보다 힙이 많이 신경 쓰이는 체형이면 한 단계 여유도 함께 비교해보시면 좋아요."
+            )
+        return (
+            f"{bottom or '입력하신 하의 사이즈'} 기준으로 힙이 신경 쓰이신다면 {particle_eun_neun(name)} 허리보다 힙과 허벅지 여유를 먼저 보시는 게 좋아요. "
+            f"핏이 너무 붙는 타입이면 한 사이즈 여유가 안전하고, 여유핏이면 정사이즈도 충분히 보실 수 있어요. "
+            f"평소 편하게 입는 팬츠의 힙·허벅지 실측과 비교해보시는 게 가장 정확합니다."
+        )
+
+    # 다리 짧음/키/길이 고민: 짧은 세미배기/앵클 계열은 긍정 상담
+    if any(k in q for k in ["다리", "짧", "키", "길이"]):
+        if flags["semi_baggy"] or flags["short_length"] or flags["straight"]:
+            len_text = f" 총장 {length}cm 기준으로" if length else ""
+            return (
+                f"다리 비율이 걱정되신다면 {particle_eun_neun(name)} 오히려 괜찮게 보실 수 있어요."
+                f"{len_text} 일반 롱 슬랙스처럼 길게 끌리는 타입보다 살짝 짧고 딱 떨어지는 세미 배기핏이라, "
+                f"수선 없이 입었을 때 발목선이 정리되면 다리가 답답해 보이지 않는 장점이 있어요. "
+                f"다만 체감 길이는 고객님이 평소 즐겨 입는 팬츠 총장, 이 상품의 총장, 그리고 상세페이지 모델컷의 떨어지는 위치를 함께 비교해보시면 가장 정확합니다."
+            )
+        return (
+            f"다리 비율이 걱정되시면 {particle_eun_neun(name)} 전체 총장과 밑단이 떨어지는 위치를 같이 보시는 게 좋아요. "
+            f"너무 길어 끌리면 오히려 짧아 보일 수 있고, 발등 가까이 자연스럽게 떨어지면 비율이 좋아 보여요. "
+            f"평소 즐겨 입는 팬츠 길이와 상품 총장을 비교해보시는 것이 가장 정확한 선택법입니다."
+        )
+
     return ""
 
 
@@ -665,10 +777,13 @@ def fallback_answer(user_text: str, current: Dict) -> str:
     cat = current.get("category", "")
     b = body_context()
     if intent == "fit_size":
+        product_fit = product_aware_fit_answer(user_text, current)
+        if product_fit:
+            return product_fit
         if any(k in user_text for k in ["힙", "허벅지", "골반"]):
-            return f"{call}, {name}은 힙이나 허벅지가 있는 편이면 너무 딱 맞게 보기보다는 여유감을 먼저 보는 게 좋아요. 현재 입력 사이즈 기준으로는 입는 것 자체보다 힙 라인이 얼마나 편하게 떨어지는지가 중요해서, 편한 핏을 원하시면 한 단계 여유 있는 슬랙스도 같이 보시는 게 안전해요."
+            return f"{call}, {name}은 힙이나 허벅지가 있는 편이면 허리보다 힙과 허벅지 실측을 먼저 보시는 게 좋아요. 편하게 예쁜 핏을 원하시면 평소 즐겨 입는 팬츠의 허리·힙·허벅지와 비교해보시는 게 가장 정확합니다."
         if any(k in user_text for k in ["다리", "짧", "키"]):
-            return f"{call}, 다리 비율이 걱정되시면 {name}은 기장과 밑단 라인을 같이 보시는 게 중요해요. 실패 적게 가시려면 너무 퍼지는 핏보다 일자로 깔끔하게 떨어지는 쪽이 더 안정적이에요."
+            return f"{call}, 다리 비율이 걱정되시면 {name}은 전체 총장과 밑단이 떨어지는 위치를 같이 보시면 좋아요. 평소 즐겨 입는 팬츠 길이와 이 상품의 총장을 비교해보시는 게 가장 정확합니다."
         return f"{call}, {name}은 현재 입력하신 사이즈 기준으로 먼저 가능 여부를 보고, 그다음 핏 체감을 봐야 해요. 편하게 입고 싶으시면 실측 여유와 후기 반응까지 같이 보는 쪽이 안전해요."
     if intent == "feature":
         return f"{call}, {name}의 장점은 데일리로 입기 부담 없는 안정적인 핏이에요. 너무 과하게 멋낸 느낌보다 깔끔하게 정리되는 쪽이라 출근이나 일상 코디에 활용하기 좋아요."
