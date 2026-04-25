@@ -882,8 +882,9 @@ def markdown_product_line(i: int, row: Dict) -> str:
     reason = clean_text(row.get("_gpt_reason", "")) or fallback_reason_for_candidate(row, "coordi_recommend", "")
     size_part = f" ({size})" if size else ""
     if url:
-        return f"{i}. [{name}]({url}){size_part} — {reason}"
-    return f"{i}. {name}{size_part} — {reason}"
+        return f'<div class="rec-item">{i}. <a href="{url}" target="_blank" rel="noopener noreferrer">{name}</a>{size_part} — {reason}</div>'
+    return f'<div class="rec-item">{i}. {name}{size_part} — {reason}</div>'
+
 
 def build_recommendation_answer(user_text: str, current: Dict) -> str:
     intent = detect_intent(user_text)
@@ -900,9 +901,10 @@ def build_recommendation_answer(user_text: str, current: Dict) -> str:
 
     st.session_state.last_recommendations = candidates[:3]
 
-    lines = [recommendation_heading(intent, user_text, current)]
+    heading = recommendation_heading(intent, user_text, current)
+    item_lines = []
     for i, row in enumerate(candidates[:3], 1):
-        lines.append(markdown_product_line(i, row))
+        item_lines.append(markdown_product_line(i, row))
 
     q = clean_text(user_text)
     if any(k in q for k in ["출근", "회사", "오피스"]):
@@ -914,7 +916,7 @@ def build_recommendation_answer(user_text: str, current: Dict) -> str:
     else:
         tail = "마음 가는 번호를 말씀해주시면 그 상품 기준으로 사이즈감과 코디까지 이어서 봐드릴게요."
 
-    return "\n".join(lines + [tail])
+    return f"{heading}<div class=\"rec-list\">{''.join(item_lines)}</div><div class=\"rec-tail\">{tail}</div>"
 
 
 def call_gpt(user_text: str, current: Dict) -> Optional[str]:
@@ -1031,7 +1033,11 @@ footer{visibility:hidden;}
 .beta-badge{font-size:11px;background:#0f766e;color:#fff;border-radius:999px;padding:3px 8px;font-weight:700;}
 .miya-sub{color:#666;font-size:14px;margin-bottom:18px;text-align:center;}
 .chat-user{background:#e5f4ef;color:#12423a;border:1px solid #c6ded8;border-radius:18px 18px 4px 18px;padding:12px 14px;margin:8px 0 8px auto;max-width:82%;line-height:1.55;}
-.chat-bot{background:#08245a;color:#fff;border-radius:18px 18px 18px 4px;padding:13px 15px;margin:8px auto 8px 0;max-width:86%;line-height:1.58;}
+.chat-bot{background:#08245a;color:#fff;border-radius:18px 18px 18px 4px;padding:13px 15px;margin:8px auto 8px 0;max-width:86%;line-height:1.58;white-space:normal;}
+.rec-list{margin-top:8px;}
+.rec-item{margin:5px 0;line-height:1.55;}
+.rec-item a{color:#fff;text-decoration:underline;font-weight:700;}
+.rec-tail{margin-top:8px;line-height:1.55;}
 .label{font-size:12px;color:#666;margin:8px 0 3px;font-weight:700;}
 .stTextInput input, .stSelectbox div[data-baseweb="select"]{border-radius:12px;}
 </style>
@@ -1086,10 +1092,13 @@ if user_input:
     st.session_state.messages.append({"role":"user", "content":user_input})
     answer = ""
     intent = detect_intent(user_input)
+    is_recommendation_html = False
 
     # 추천/코디/대체상품은 번호와 상품 링크가 꼬이지 않도록 코드가 직접 리스트를 만듭니다.
     if intent in ["coordi_recommend", "alternative_recommend"]:
         answer = build_recommendation_answer(user_input, current)
+        if answer:
+            is_recommendation_html = True
 
     if not answer:
         answer = fast_answer(user_input, current)
@@ -1097,6 +1106,8 @@ if user_input:
         answer = call_gpt(user_input, current)
     if not answer or len(clean_text(answer)) < 10:
         answer = fallback_answer(user_input, current)
-    answer = safe_postprocess(answer, customer_call())
+
+    if not is_recommendation_html:
+        answer = safe_postprocess(answer, customer_call())
     st.session_state.messages.append({"role":"assistant", "content":answer})
     st.rerun()
