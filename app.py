@@ -284,17 +284,34 @@ def fetch_product_context(url: str, product_no: str = "", product_name: str = ""
 def detect_intent(user_text: str) -> str:
     q = clean_text(user_text)
     no_space = q.replace(" ", "")
-    if no_space in {"응", "네", "넵", "좋아", "그래", "ㅇㅇ", "어"}: return "affirm"
-    if re.search(r"[123]번|첫 ?번째|두 ?번째|세 ?번째", q): return "followup_selected"
-    if any(k in q for k in ["일자", "부츠컷", "숏", "롱", "타입", "기본형", "와이드형"]): return "option_choice"
-    if any(k in q for k in ["장점", "특징", "왜 좋아", "뭐가 좋아", "좋은 점"]): return "feature"
-    if any(k in q for k in ["비교", "둘 중", "뭐가 더", "어느 게", "어느게"]): return "compare"
-    if any(k in q for k in ["컬러", "색상", "무슨 색", "어떤 색", "블랙", "아이보리", "베이지", "브라운"]): return "color"
-    if any(k in q for k in ["어울리는", "같이 입", "코디", "안에 입", "신발", "가방", "머플러"]): return "coordi_recommend"
-    if any(k in q for k in ["비슷", "다른", "대신", "더 좋은", "더 나은", "추천"]): return "alternative_recommend"
-    if any(k in q for k in ["배송", "교환", "반품", "환불", "출고"]): return "policy"
-    if any(k in q for k in ["힙", "허벅지", "골반", "복부", "상체", "가슴", "다리", "짧", "키", "맞", "사이즈", "핏", "작", "클", "여유", "타이트"]): return "fit_size"
+    if no_space in {"응", "네", "넵", "좋아", "그래", "ㅇㅇ", "어"}:
+        return "affirm"
+    if re.search(r"[123]번|첫 ?번째|두 ?번째|세 ?번째", q):
+        return "followup_selected"
+    if any(k in q for k in ["일자", "부츠컷", "숏", "롱", "타입", "기본형", "와이드형"]):
+        return "option_choice"
+    if any(k in q for k in ["장점", "특징", "왜 좋아", "뭐가 좋아", "좋은 점"]):
+        return "feature"
+    if any(k in q for k in ["비교", "둘 중", "뭐가 더", "어느 게", "어느게"]):
+        return "compare"
+    if any(k in q for k in ["컬러", "색상", "무슨 색", "어떤 색", "블랙", "아이보리", "베이지", "브라운"]):
+        return "color"
+
+    explicit_cat = explicit_target_category_from_text(q)
+    # 사용자가 특정 카테고리 + 추천/코디/어울림을 말하면, 현재 상품이 무엇이든 코디추천으로 처리
+    if explicit_cat and any(k in q for k in ["추천", "코디", "어울", "같이", "입을", "매치"]):
+        return "coordi_recommend"
+
+    if any(k in q for k in ["어울리는", "같이 입", "코디", "안에 입", "신발", "가방", "머플러"]):
+        return "coordi_recommend"
+    if any(k in q for k in ["비슷", "다른", "대신", "더 좋은", "더 나은", "추천"]):
+        return "alternative_recommend"
+    if any(k in q for k in ["배송", "교환", "반품", "환불", "출고"]):
+        return "policy"
+    if any(k in q for k in ["힙", "허벅지", "골반", "복부", "상체", "가슴", "다리", "짧", "키", "맞", "사이즈", "핏", "작", "클", "여유", "타이트"]):
+        return "fit_size"
     return "general"
+
 
 # =========================================================
 # 후보 검색
@@ -314,6 +331,33 @@ def target_category_from_text(text: str, current_category: str = "") -> str:
     if any(k in q for k in BAG_WORDS): return "가방"
     if any(k in q for k in ACC_WORDS): return "악세사리"
     return current_category or "기타"
+
+
+def explicit_target_category_from_text(text: str) -> str:
+    """사용자가 직접 말한 카테고리를 최우선으로 잡습니다. 현재 상품 카테고리보다 우선합니다."""
+    q = clean_text(text)
+    if any(k in q for k in ["팬츠", "바지", "슬랙스", "데님", "청바지"]):
+        return "팬츠"
+    if any(k in q for k in ["자켓", "재킷", "아우터", "코트", "점퍼"]):
+        return "자켓"
+    if "가디건" in q:
+        return "니트"
+    if any(k in q for k in ["블라우스"]):
+        return "블라우스"
+    if any(k in q for k in ["셔츠"]):
+        return "셔츠"
+    if any(k in q for k in ["니트"]):
+        return "니트"
+    if any(k in q for k in ["티셔츠", "티", "상의", "탑"]):
+        return "티셔츠"
+    if any(k in q for k in SHOE_WORDS):
+        return "신발"
+    if any(k in q for k in BAG_WORDS):
+        return "가방"
+    if any(k in q for k in ACC_WORDS):
+        return "악세사리"
+    return ""
+
 
 def size_ok_for_user(row: Dict, target_cat: str) -> bool:
     # Conservative: do not filter too hard; only block clear size miss for clothing
@@ -377,7 +421,11 @@ def find_candidates(intent: str, user_text: str, current: Dict, limit: int = 5) 
     current_cat = current.get("category", "기타")
     current_no = normalize_product_no(current.get("product_no", ""))
     q = clean_text(user_text)
-    if intent == "alternative_recommend":
+
+    explicit_cat = explicit_target_category_from_text(q)
+    if explicit_cat:
+        target_cat = explicit_cat
+    elif intent == "alternative_recommend":
         target_cat = current_cat if current_cat != "기타" else target_category_from_text(q, current_cat)
     elif intent == "coordi_recommend":
         target_cat = target_category_from_text(q, "팬츠" if current_cat in ["자켓", "블라우스", "셔츠", "니트", "맨투맨", "티셔츠"] else "블라우스")
@@ -387,22 +435,31 @@ def find_candidates(intent: str, user_text: str, current: Dict, limit: int = 5) 
     scored = []
     for row in DB_ROWS:
         pno = normalize_product_no(row.get("product_no", ""))
-        if current_no and pno == current_no: continue
+        if current_no and pno == current_no:
+            continue
         cat = row_category(row)
         if target_cat and target_cat != "기타" and not row_category_matches(row, target_cat):
             continue
-        if not size_ok_for_user(row, cat): continue
+        if not size_ok_for_user(row, cat):
+            continue
         sc = 1
         blob = f"{row.get('product_name','')} {row.get('category','')} {row.get('sub_category','')} {row.get('style_tags','')} {row.get('body_cover_features','')} {row.get('product_summary','')} {row.get('fabric','')}"
+        # 명시 카테고리와 정확히 맞으면 가중치
+        if explicit_cat and row_category_matches(row, explicit_cat):
+            sc += 5
         for t in tokens(q):
-            if t in blob: sc += 1
+            if t in blob:
+                sc += 1
         if any(k in q for k in ["출근", "학교", "상담", "단정"]):
-            if any(k in blob for k in ["단정", "클래식", "슬랙스", "셔츠", "블라우스", "자켓"]): sc += 2
-        if any(k in q for k in ["힙", "허벅지", "복부"]):
-            if any(k in blob for k in ["커버", "와이드", "배기", "핀턱", "여유"]): sc += 2
+            if any(k in blob for k in ["단정", "클래식", "슬랙스", "셔츠", "블라우스", "자켓"]):
+                sc += 2
+        if any(k in q for k in ["힙", "허벅지", "복부", "뱃살"]):
+            if any(k in blob for k in ["커버", "와이드", "배기", "핀턱", "여유", "허리라인"]):
+                sc += 2
         scored.append((sc, row))
     scored.sort(key=lambda x: -x[0])
     return [r for _, r in scored[:limit]]
+
 
 def find_compare_target(user_text: str, current: Dict) -> Optional[Dict]:
     q = clean_text(user_text)
@@ -760,17 +817,21 @@ def strip_numbered_list_from_gpt(text: str) -> str:
 def recommendation_heading(intent: str, user_text: str, current: Dict) -> str:
     q = clean_text(user_text)
     current_name = current.get("product_name", "지금 보시는 상품")
-    if intent == "alternative_recommend":
-        return f"{current_name}과 비슷한 무드에서 대안으로 볼 만한 상품이에요."
-    if any(k in q for k in ["블라우스", "셔츠", "상의"]):
+    explicit_cat = explicit_target_category_from_text(q)
+    if explicit_cat == "팬츠":
+        return "같이 입기 좋은 팬츠 쪽으로 골라드릴게요."
+    if explicit_cat in ["블라우스", "셔츠", "티셔츠"]:
         return "출근룩으로 같이 입기 좋은 상의 쪽으로 골라드릴게요."
-    if any(k in q for k in ["자켓", "재킷", "아우터", "가디건"]):
+    if explicit_cat in ["자켓", "니트"]:
         return "함께 걸치기 좋은 아우터 쪽으로 골라드릴게요."
-    if any(k in q for k in ["신발", "슈즈", "로퍼", "힐"]):
+    if explicit_cat == "신발":
         return "이 코디에 맞는 신발 쪽으로 골라드릴게요."
-    if any(k in q for k in ["가방", "백"]):
+    if explicit_cat == "가방":
         return "전체 분위기에 맞는 가방 쪽으로 골라드릴게요."
+    if intent == "alternative_recommend":
+        return f"{particle_wa_gwa(current_name)} 비슷한 무드에서 대안으로 볼 만한 상품이에요."
     return "같이 입기 좋은 상품으로 골라드릴게요."
+
 
 def fallback_reason_for_candidate(row: Dict, intent: str, user_text: str) -> str:
     return product_reason_from_row(row, intent, user_text)
@@ -897,7 +958,18 @@ def build_recommendation_answer(user_text: str, current: Dict) -> str:
         return ""
 
     ranked = rank_candidates_with_gpt(user_text, current, intent, raw_candidates)
-    candidates = ranked if ranked else raw_candidates[:3]
+    if ranked:
+        candidates = list(ranked)
+        used_nos = {normalize_product_no(r.get("product_no", "")) for r in candidates}
+        for row in raw_candidates:
+            pno = normalize_product_no(row.get("product_no", ""))
+            if pno not in used_nos:
+                candidates.append(row)
+                used_nos.add(pno)
+            if len(candidates) >= 3:
+                break
+    else:
+        candidates = raw_candidates[:3]
 
     st.session_state.last_recommendations = candidates[:3]
 
@@ -907,7 +979,10 @@ def build_recommendation_answer(user_text: str, current: Dict) -> str:
         item_lines.append(markdown_product_line(i, row))
 
     q = clean_text(user_text)
-    if any(k in q for k in ["출근", "회사", "오피스"]):
+    explicit_cat = explicit_target_category_from_text(q)
+    if explicit_cat == "팬츠":
+        tail = "상의와 연결했을 때 하체 라인을 정리해주고, 고객님 하의 사이즈 기준으로도 비교해볼 만한 팬츠들이에요."
+    elif any(k in q for k in ["출근", "회사", "오피스"]):
         tail = "위 상품들은 출근룩 기준으로 너무 캐주얼하지 않고, 팬츠와 같이 입었을 때 전체 분위기가 단정하게 정리되는 쪽이에요."
     elif any(k in q for k in ["검정", "블랙"]):
         tail = "블랙 팬츠와 맞출 때는 상의나 아우터가 너무 무겁지 않게 정리되는 쪽이 좋아서, 밝은 톤이나 차분한 기본 컬러 위주로 보시면 실패가 적어요."
