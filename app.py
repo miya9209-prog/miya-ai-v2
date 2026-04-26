@@ -81,19 +81,27 @@ def size_rank(s: str) -> Optional[int]:
     return SIZE_ORDER.get(clean_text(s))
 
 def detect_category(text: str) -> str:
+    """상품명/카테고리 텍스트에서 카테고리를 판단. 순서가 핵심."""
     c = clean_text(text)
-    if any(w in c for w in SHOE_WORDS): return "신발"
     if any(w in c for w in BAG_WORDS): return "가방"
     if any(w in c for w in ACC_WORDS): return "악세사리"
+    # ★ 상의류 - 셔츠/블라우스를 데님보다 반드시 먼저 체크
     if any(w in c for w in ["블라우스", "블라우스/셔츠"]): return "블라우스"
     if "셔츠" in c and "셔츠 자켓" not in c: return "셔츠"
     if "맨투맨" in c: return "맨투맨"
-    if "티셔츠" in c or "티" in c: return "티셔츠"
+    if "티셔츠" in c: return "티셔츠"
     if "가디건" in c: return "가디건"
     if "니트" in c: return "니트"
-    if any(w in c for w in ["자켓", "재킷", "점퍼", "코트", "조끼", "베스트", "아우터"]): return "자켓"
+    # 아우터
+    if any(w in c for w in ["자켓", "재킷", "점퍼", "코트", "베스트", "조끼", "아우터"]): return "자켓"
+    # ★ 하의 - 치마슬랙스는 팬츠로, 일반 스커트/원피스는 스커트
+    if "치마슬랙스" in c or "스커트팬츠" in c: return "팬츠"
+    if any(w in c for w in ["스커트", "치마", "원피스"]): return "스커트"
     if any(w in c for w in ["팬츠", "슬랙스", "바지", "데님", "청바지"]): return "팬츠"
-    if any(w in c for w in ["스커트", "치마"]): return "스커트"
+    # ★ 신발 마지막 - "부츠컷 팬츠"가 신발로 오분류되는 것 방지
+    if any(w in c for w in SHOE_WORDS):
+        if not any(w in c for w in ["팬츠", "슬랙스", "바지"]):
+            return "신발"
     return "기타"
 
 def tokens(text: str) -> List[str]:
@@ -286,6 +294,11 @@ def detect_intent(user_text: str) -> str:
     no_space = q.replace(" ", "")
     if no_space in {"응", "네", "넵", "좋아", "그래", "ㅇㅇ", "어"}:
         return "affirm"
+    # ★ 체형/핏 질문 — 추천보다 먼저 체크 (배가 부각, 체형보정, M/L 사이즈)
+    if any(k in q for k in ["체형보정", "보정", "커버", "부각", "가려", "숨겨", "보완"]):
+        return "fit_size"
+    if re.search(r"[Mm]|[Ll]|라지|스몰|미디엄", q) and any(k in q for k in ["나을까", "좋을까", "어때", "선택", "사이즈"]):
+        return "fit_size"
     if re.search(r"[123]번|첫 ?번째|두 ?번째|세 ?번째", q):
         return "followup_selected"
     if any(k in q for k in ["일자", "부츠컷", "숏", "롱", "타입", "기본형", "와이드형"]):
@@ -383,21 +396,27 @@ def row_category(row: Dict) -> str:
     return detect_category(f"{row.get('category','')} {row.get('sub_category','')} {row.get('product_name','')}")
 
 def row_category_matches(row: Dict, target_cat: str) -> bool:
-    cat_blob = clean_text(f"{row.get('category','')} {row.get('sub_category','')} {row.get('product_name','')}")
+    """상품명 기반 카테고리(name_cat)를 우선 사용. DB category/sub_category는 보조."""
+    name_cat = detect_category(row.get("product_name", ""))
+    db_blob = clean_text(f"{row.get('category','')} {row.get('sub_category','')}")
     cat = row_category(row)
     if not target_cat or target_cat == "기타":
         return True
-    if target_cat == "블라우스":
-        return cat in ["블라우스", "셔츠"] or any(k in cat_blob for k in ["블라우스", "셔츠", "블라우스/셔츠"])
-    if target_cat == "셔츠":
-        return cat in ["블라우스", "셔츠"] or "셔츠" in cat_blob
-    if target_cat == "니트":
-        return cat in ["니트", "가디건"] or any(k in cat_blob for k in ["니트", "가디건"])
-    if target_cat == "자켓":
-        return cat == "자켓" or any(k in cat_blob for k in ["자켓", "재킷", "점퍼", "코트", "조끼", "베스트", "아우터"])
     if target_cat == "팬츠":
-        return cat == "팬츠" or any(k in cat_blob for k in ["팬츠", "슬랙스", "바지", "데님", "청바지"])
-    return cat == target_cat or target_cat in cat_blob
+        # ★ 상품명에 셔츠/자켓/블라우스 등이 명확히 있으면 팬츠에서 제외
+        if name_cat in ["셔츠", "블라우스", "자켓", "니트", "가디건", "맨투맨", "티셔츠"]:
+            return False
+        return cat == "팬츠" or any(k in db_blob for k in ["팬츠", "슬랙스", "바지", "데님", "청바지"])
+    if target_cat == "자켓":
+        # 셔츠인데 '자켓'이 상품명에 없으면 제외
+        if name_cat == "셔츠" and "자켓" not in row.get("product_name", ""):
+            return False
+        return cat == "자켓" or any(k in db_blob for k in ["자켓", "재킷", "점퍼", "코트", "조끼", "베스트", "아우터"])
+    if target_cat in ["블라우스", "셔츠"]:
+        return name_cat in ["블라우스", "셔츠"] or any(k in db_blob for k in ["블라우스", "셔츠", "블라우스/셔츠"])
+    if target_cat == "니트":
+        return name_cat in ["니트", "가디건"] or any(k in db_blob for k in ["니트", "가디건"])
+    return cat == target_cat or target_cat in db_blob
 
 def product_reason_from_row(row: Dict, intent: str, user_text: str) -> str:
     name = clean_text(row.get("product_name", ""))
@@ -741,7 +760,8 @@ def measurement_value(current: Dict, keys: list) -> str:
 
 def product_aware_fit_answer(user_text: str, current: Dict) -> str:
     q = clean_text(user_text)
-    if not any(k in q for k in ["힙", "골반", "허벅지", "하체", "다리", "짧", "키", "길이", "사이즈", "고르면", "맞을까", "어울릴까"]):
+    if not any(k in q for k in ["힙", "골반", "허벅지", "하체", "다리", "짧", "키", "길이", "사이즈", "고르면", "맞을까", "어울릴까",
+                              "체형보정", "보정", "커버", "부각", "가려", "숨겨", "보완", "비율"]):
         return ""
 
     name = current.get("product_name", "지금 보시는 상품")
@@ -752,6 +772,24 @@ def product_aware_fit_answer(user_text: str, current: Dict) -> str:
     waist = measurement_value(current, ["waist", "허리"])
     hip = measurement_value(current, ["hip", "힙"])
     thigh = measurement_value(current, ["thigh", "허벅지"])
+
+    # ★ 체형보정/커버 질문
+    if any(k in q for k in ["체형보정", "보정", "커버", "부각", "가려", "숨겨", "보완"]):
+        if flags["semi_baggy"] or flags["wide"] or flags["pin_tuck"]:
+            details = []
+            if hip: details.append(f"힙 {hip}")
+            if waist: details.append(f"허리 {waist}")
+            detail_text = f" 실측은 {' / '.join(details)} 정도라," if details else ""
+            return (
+                f"{particle_eun_neun(name)} 핀턱과 여유 있는 배기 실루엣 덕분에 체형 커버에 유리한 타입이에요. "
+                f"복부나 힙 라인을 붙여서 드러내기보다 자연스럽게 흘러내리듯 떨어져서, "
+                f"뱃살이나 힙이 신경 쓰이는 분께도 부담이 적은 편이에요."
+                f"{detail_text} 평소 즐겨 입는 팬츠의 허리·힙 실측과 비교해보시면 더 정확합니다."
+            )
+        return (
+            f"{particle_eun_neun(name)} 체형 커버 효과는 핏과 소재에 따라 달라지는 편이에요. "
+            f"복부나 허리 라인이 신경 쓰이신다면 허리 여유와 전체 실루엣을 상세페이지에서 같이 확인해보시는 게 좋아요."
+        )
 
     # 힙/허벅지 고민: 배기/세미배기/와이드는 정사이즈 우선 판단
     if any(k in q for k in ["힙", "골반", "허벅지", "하체"]):
