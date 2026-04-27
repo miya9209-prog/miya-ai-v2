@@ -22,7 +22,7 @@ st.set_page_config(page_title="픽톡", layout="centered", initial_sidebar_state
 # =========================================================
 # 기본 설정
 # =========================================================
-APP_VERSION = "GPT-CENTERED-V2-20260427"
+APP_VERSION = "GPT-CENTERED-V2-20260427-UI-FITFIX"
 PRODUCT_DB_PATH = "misharp_miya_db.csv"
 REVIEW_SUMMARY_PATH = "review_summary.json"
 MODEL_PROFILES_PATH = "model_profiles.json"
@@ -213,9 +213,10 @@ def body_summary() -> str:
 # =========================================================
 def resolve_customer_name() -> str:
     qp = query_params()
-    if qp.get("customer_name"):
-        return qp["customer_name"]
-    for key in ["customer_id", "login_id", "email"]:
+    for direct_key in ["customer_name", "name", "member_name", "user_name", "nickname", "nick"]:
+        if qp.get(direct_key):
+            return qp[direct_key]
+    for key in ["customer_id", "login_id", "email", "member_id", "user_id"]:
         val = qp.get(key, "")
         if not val: continue
         for row in CUSTOMER_PROFILES:
@@ -799,8 +800,29 @@ def product_aware_fit_answer(user_text: str, current: Dict) -> str:
     hip = measurement_value(current, ["hip", "힙"])
     thigh = measurement_value(current, ["thigh", "허벅지"])
 
-    # 힙/허벅지 고민: 배기/세미배기/와이드는 정사이즈 우선 판단
+    # 힙/허벅지 고민: 현재 상품이 상의/니트/자켓류인 경우에는 팬츠식 사이즈 답변을 하지 않고,
+    # 실제 길이감과 커버 체감 중심으로 답합니다.
+    active_cat = current.get("category", "") or detect_category(name)
+    is_top_like = active_cat in ["니트", "가디건", "블라우스", "셔츠", "티셔츠", "맨투맨", "자켓"] or any(k in name for k in ["니트", "가디건", "블라우스", "셔츠", "티셔츠", "맨투맨", "자켓", "점퍼", "조끼"])
     if any(k in q for k in ["힙", "골반", "허벅지", "하체"]):
+        if is_top_like:
+            db = current.get("db") or get_db_product(current.get("product_no", "")) or {}
+            length_type = clean_text(db.get("length_type", "") or current.get("length_type", ""))
+            cover = clean_text(db.get("body_cover_features", ""))
+            chest = measurement_value(current, ["chest", "가슴", "가슴둘레"])
+            length_msg = f"총장 {length}cm 기준으로" if length else ("하프 기장이라" if "하프" in length_type or "하프" in name else "기장감상")
+            chest_msg = f"가슴둘레가 {chest}cm 정도라 상체는 너무 붙지 않고," if chest else "루즈하게 떨어지는 핏이라 상체는 너무 붙지 않고,"
+            if "힙커버" in cover or "하프" in length_type or flags["half_length_top"]:
+                return (
+                    f"{bottom or '66반'} 체형 기준으로 {particle_eun_neun(name)} 힙을 완전히 덮는 롱기장이라기보다는, {length_msg} 힙 윗부분과 골반선을 자연스럽게 덜어주는 쪽으로 보시면 좋아요. "
+                    f"{chest_msg} 밑단도 바디에 딱 달라붙는 타입이 아니라서 힙이 있는 편이어도 부담은 크지 않을 거예요. "
+                    f"다만 힙 전체를 확실히 가리고 싶으시면 롱 셔츠나 하프 점퍼처럼 뒤 기장이 더 내려오는 아우터를 함께 매치하시는 게 더 안전합니다."
+                )
+            return (
+                f"{particle_eun_neun(name)} 힙을 길게 가려주는 상품이라기보다는 상체 라인을 편하게 정리해주는 쪽에 가까워요. "
+                f"힙이 많이 신경 쓰이시면 하의는 와이드나 세미배기처럼 힙 라인을 붙이지 않는 팬츠로 맞추면 훨씬 안정적입니다."
+            )
+
         if flags["semi_baggy"] or flags["wide"] or flags["pin_tuck"]:
             details = []
             if hip: details.append(f"힙 {hip}")
