@@ -22,7 +22,7 @@ st.set_page_config(page_title="픽톡", layout="centered", initial_sidebar_state
 # =========================================================
 # 기본 설정
 # =========================================================
-APP_VERSION = "GPT-CENTERED-V1-20260424"
+APP_VERSION = "GPT-CENTERED-V2-20260427"
 PRODUCT_DB_PATH = "misharp_miya_db.csv"
 REVIEW_SUMMARY_PATH = "review_summary.json"
 MODEL_PROFILES_PATH = "model_profiles.json"
@@ -91,7 +91,7 @@ def detect_category(text: str) -> str:
     if "티셔츠" in c or "티" in c: return "티셔츠"
     if "가디건" in c: return "가디건"
     if "니트" in c: return "니트"
-    if any(w in c for w in ["자켓", "재킷", "점퍼", "코트", "조끼", "베스트", "아우터"]): return "자켓"
+    if any(w in c for w in ["자켓", "재킷", "점퍼", "코트", "조끼", "베스트", "아우터", "후드", "야상"]): return "자켓"
     if any(w in c for w in ["팬츠", "슬랙스", "바지", "데님", "청바지"]): return "팬츠"
     if any(w in c for w in ["스커트", "치마"]): return "스커트"
     return "기타"
@@ -304,6 +304,10 @@ def detect_intent(user_text: str) -> str:
 
     if any(k in q for k in ["어울리는", "같이 입", "코디", "안에 입", "신발", "가방", "머플러"]):
         return "coordi_recommend"
+    if any(k in q for k in ["대체", "말고"]):
+        if explicit_target_category_from_text(q):
+            return "coordi_recommend"
+        return "alternative_recommend"
     if any(k in q for k in ["비슷", "다른", "대신", "더 좋은", "더 나은", "추천"]):
         return "alternative_recommend"
     if any(k in q for k in ["배송", "교환", "반품", "환불", "출고"]):
@@ -318,7 +322,7 @@ def detect_intent(user_text: str) -> str:
 # =========================================================
 def target_category_from_text(text: str, current_category: str = "") -> str:
     q = clean_text(text)
-    if any(k in q for k in ["자켓", "재킷", "아우터", "코트", "점퍼", "가디건"]):
+    if any(k in q for k in ["자켓", "재킷", "아우터", "코트", "점퍼", "가디건", "후드", "야상"]):
         if "가디건" in q:
             return "니트"
         return "자켓"
@@ -338,7 +342,7 @@ def explicit_target_category_from_text(text: str) -> str:
     q = clean_text(text)
     if any(k in q for k in ["팬츠", "바지", "슬랙스", "데님", "청바지"]):
         return "팬츠"
-    if any(k in q for k in ["자켓", "재킷", "아우터", "코트", "점퍼"]):
+    if any(k in q for k in ["자켓", "재킷", "아우터", "코트", "점퍼", "후드", "야상"]):
         return "자켓"
     if "가디건" in q:
         return "니트"
@@ -394,7 +398,7 @@ def row_category_matches(row: Dict, target_cat: str) -> bool:
     if target_cat == "니트":
         return cat in ["니트", "가디건"] or any(k in cat_blob for k in ["니트", "가디건"])
     if target_cat == "자켓":
-        return cat == "자켓" or any(k in cat_blob for k in ["자켓", "재킷", "점퍼", "코트", "조끼", "베스트", "아우터"])
+        return cat == "자켓" or any(k in cat_blob for k in ["자켓", "재킷", "점퍼", "코트", "조끼", "베스트", "아우터", "후드", "야상"])
     if target_cat == "팬츠":
         return cat == "팬츠" or any(k in cat_blob for k in ["팬츠", "슬랙스", "바지", "데님", "청바지"])
     return cat == target_cat or target_cat in cat_blob
@@ -669,7 +673,49 @@ def fast_body_fit_answer(user_text: str, current: Dict) -> str:
 
     return ""
 
+
+def option_values_from_text(text: str) -> List[str]:
+    text = clean_text(text)
+    vals = []
+    for c in COLOR_WORDS:
+        if c in text and c not in vals:
+            vals.append(c)
+    # DB에 콤마/슬래시로 색상이 들어온 경우 보정
+    for part in re.split(r"[,/·|\s]+", text):
+        part = clean_text(part)
+        if part and part in COLOR_WORDS and part not in vals:
+            vals.append(part)
+    return vals
+
+def fast_color_answer(user_text: str, current: Dict) -> str:
+    q = clean_text(user_text)
+    if not any(k in q for k in ["컬러", "색상", "색", "무슨 색", "어떤 색", "골라"]):
+        return ""
+    name = current.get("product_name") or "지금 보시는 상품"
+    colors = option_values_from_text(current.get("colors", "") or current_product_blob(current))
+    top = st.session_state.get("body_top", "")
+    # 출근룩/상체 고민 기준 안전한 컬러 우선순위
+    if any(k in q for k in ["출근", "회사", "오피스", "단정"]):
+        preferred = [c for c in ["아이보리", "베이지", "크림", "네이비", "블랙", "그레이"] if (not colors or c in colors)]
+        pick = preferred[0] if preferred else (colors[0] if colors else "아이보리나 베이지")
+        return f"출근룩으로 자주 입으실 거면 {particle_eun_neun(name)} {pick} 계열을 먼저 추천드려요. 얼굴이 환해 보이고, 슬랙스나 데님에도 단정하게 맞추기 좋아요. 상체가 신경 쓰이시면 너무 강한 색보다 밝고 차분한 톤이 부담이 적습니다."
+    if any(k in q for k in ["상체", "가슴", "부해", "커보"]):
+        pick = "네이비" if (not colors or "네이비" in colors) else ("블랙" if (not colors or "블랙" in colors) else (colors[0] if colors else "차분한 톤"))
+        return f"상체가 커 보이는 게 걱정이면 {particle_eun_neun(name)} {pick}처럼 차분한 컬러가 가장 안전해요. 밝은 컬러는 얼굴은 환해 보이지만 상체 볼륨이 더 도드라질 수 있어서, 핏 여유와 함께 보시는 게 좋아요."
+    if colors:
+        pick = colors[0]
+        return f"색상은 {pick}을 먼저 추천드릴게요. 데일리로 코디하기 쉽고, 4050 출근룩 기준에서도 과하지 않게 정리되는 컬러예요."
+    return f"색상은 밝은 베이지나 크림 계열을 먼저 추천드릴게요. 얼굴을 환하게 해주고 출근룩으로도 무겁지 않게 입기 좋아요."
+
 def fast_answer(user_text: str, current: Dict) -> str:
+    # 색상/추천/핏처럼 반복 테스트가 많은 질문은 GPT 전에 안전 응답을 우선 적용합니다.
+    try:
+        ans = fast_color_answer(user_text, current)
+        if ans:
+            return safe_postprocess(ans, customer_call())
+    except Exception:
+        pass
+
     # 상품 특성 기반 핏 상담을 가장 먼저 적용합니다.
     try:
         ans = product_aware_fit_answer(user_text, current)
@@ -823,7 +869,7 @@ def recommendation_heading(intent: str, user_text: str, current: Dict) -> str:
     if explicit_cat in ["블라우스", "셔츠", "티셔츠"]:
         return "출근룩으로 같이 입기 좋은 상의 쪽으로 골라드릴게요."
     if explicit_cat in ["자켓", "니트"]:
-        return "함께 걸치기 좋은 아우터 쪽으로 골라드릴게요."
+        return "바지 말고 전체 실루엣을 잡아줄 아우터 쪽으로 골라드릴게요." if any(k in q for k in ["바지말고", "바지 말고", "팬츠말고", "팬츠 말고", "대체"]) else "함께 걸치기 좋은 아우터 쪽으로 골라드릴게요."
     if explicit_cat == "신발":
         return "이 코디에 맞는 신발 쪽으로 골라드릴게요."
     if explicit_cat == "가방":
