@@ -128,7 +128,10 @@ def safe_postprocess(answer: str, customer_call: str) -> str:
         p = p.strip()
         if p and p not in seen:
             out.append(p); seen.add(p)
-    return " ".join(out).strip()
+    ans = " ".join(out).strip()
+    ans = ans.replace("는는", "는").replace("은은", "은").replace("를를", "를").replace("을을", "을")
+    ans = re.sub(r"\s+", " ", ans).strip()
+    return ans
 
 # =========================================================
 # 데이터 로드
@@ -567,27 +570,43 @@ def is_bust_question(user_text: str) -> bool:
     return any(k in q for k in ["가슴", "상체", "바스트", "품", "부해"])
 
 def product_category_group(current: Dict) -> str:
-    """상담 기준용 넓은 카테고리. 추천 카테고리는 기존 로직을 그대로 둡니다."""
+    """상담 기준용 넓은 카테고리. 상품명에 들어 있는 실제 의류 타입을 최우선으로 봅니다."""
     name = clean_text(current.get("product_name", ""))
     cat = clean_text(current.get("category", ""))
     try:
         blob = current_product_blob(current)
     except Exception:
         blob = f"{name} {cat}"
-    text = f"{cat} {name} {blob}"
 
+    # 상품명 우선 판정: URL 카테고리나 상세 텍스트가 섞여도 현재 상품명 기준을 먼저 고정합니다.
+    if any(k in name for k in ["스커트", "치마"]):
+        return "skirt"
+    if any(k in name for k in ["원피스", "드레스"]):
+        return "dress"
+    if any(k in name for k in ["조끼", "베스트"]):
+        return "vest"
+    if any(k in name for k in ["셔츠", "블라우스", "니트", "가디건", "맨투맨", "티셔츠", "티", "탑"]):
+        return "top"
+    if any(k in name for k in ["자켓", "재킷", "점퍼", "코트", "아우터", "야상"]):
+        return "outer"
+    if any(k in name for k in ["팬츠", "슬랙스", "바지", "청바지", "반바지", "쇼츠"]):
+        return "bottom"
+    if "데님" in name and not any(k in name for k in ["셔츠", "스커트", "원피스", "자켓", "조끼"]):
+        return "bottom"
+
+    text = f"{cat} {blob}"
     if any(k in text for k in ["스커트", "치마"]):
         return "skirt"
     if any(k in text for k in ["원피스", "드레스"]):
         return "dress"
-    if any(k in text for k in ["팬츠", "슬랙스", "바지", "청바지", "데님", "반바지", "쇼츠"]):
-        return "bottom"
-    if any(k in text for k in ["자켓", "재킷", "점퍼", "코트", "아우터", "야상"]):
-        return "outer"
     if any(k in text for k in ["조끼", "베스트"]):
         return "vest"
-    if any(k in text for k in ["니트", "가디건", "맨투맨", "티셔츠", "티", "블라우스", "셔츠", "탑"]):
+    if any(k in text for k in ["자켓", "재킷", "점퍼", "코트", "아우터", "야상"]):
+        return "outer"
+    if any(k in text for k in ["셔츠", "블라우스", "니트", "가디건", "맨투맨", "티셔츠", "티", "탑"]):
         return "top"
+    if any(k in text for k in ["팬츠", "슬랙스", "바지", "청바지", "데님", "반바지", "쇼츠"]):
+        return "bottom"
     return "unknown"
 
 def build_consultation_lock(user_text: str, current: Dict) -> Dict:
@@ -663,12 +682,12 @@ def enforce_consultation_consistency(answer: str, user_text: str, current: Dict)
         return (
             f"다리 비율이 걱정되신다면 {particle_eun_neun(name)} 상의 기장과 밑단 위치를 중심으로 보시면 좋아요. "
             f"상의 끝선이 너무 아래로 길게 내려오지 않으면 허리선이 살아나서 다리가 더 길어 보이는 효과가 있습니다. "
-            f"하이웨스트 라인으로 맞추면 전체 비율이 더 안정적으로 보이고. 판단 기준은 다른 옷의 실측이 아니라 이 셔츠의 기장과 밑단 위치로 보시면 좋아요."
+            f"하이웨스트 라인으로 맞추면 전체 비율이 더 안정적으로 보입니다. 판단 기준은 이 셔츠의 기장과 밑단 위치로 보시면 좋아요."
         )
     if group == "skirt":
         return (
             f"힙이나 다리 비율이 신경 쓰이신다면 {particle_eun_neun(name)} 허리선, 힙 통과감, 기장 흐름을 같이 보시면 좋아요. "
-            f"스커트는 팬츠처럼 허벅지 실측을 보는 것보다 힙에서 당김 없이 지나가고 밑단이 자연스럽게 퍼지는지가 더 중요합니다. "
+            f"스커트는 힙에서 당김 없이 지나가고 밑단이 자연스럽게 퍼지는지가 더 중요합니다. "
             f"상의를 살짝 넣어 허리선을 만들면 전체 비율도 더 좋아 보이실 거예요."
         )
     return answer
@@ -750,6 +769,16 @@ def particle_eun_neun(name: str) -> str:
         return f"{name}{'은' if has_jong else '는'}"
     except Exception:
         return f"{name}은"
+
+def particle_wa_gwa(name: str) -> str:
+    name = clean_text(name) or "상품"
+    last = name[-1]
+    try:
+        code = ord(last) - ord("가")
+        has_jong = 0 <= code <= 11171 and (code % 28) != 0
+        return f"{name}{'과' if has_jong else '와'}"
+    except Exception:
+        return f"{name}와"
 
 def fast_size_option_answer(user_text: str, current: Dict) -> str:
     q = clean_text(user_text)
@@ -1070,7 +1099,7 @@ def recommendation_heading(intent: str, user_text: str, current: Dict) -> str:
     if explicit_cat == "팬츠":
         return "같이 입기 좋은 팬츠 쪽으로 골라드릴게요."
     if explicit_cat in ["블라우스", "셔츠", "티셔츠"]:
-        return "출근룩으로 같이 입기 좋은 상의 쪽으로 골라드릴게요."
+        return "같이 입기 좋은 상의 쪽으로 골라드릴게요."
     if explicit_cat in ["자켓", "니트"]:
         return "바지 말고 전체 실루엣을 잡아줄 아우터 쪽으로 골라드릴게요." if any(k in q for k in ["바지말고", "바지 말고", "팬츠말고", "팬츠 말고", "대체"]) else "함께 걸치기 좋은 아우터 쪽으로 골라드릴게요."
     if explicit_cat == "신발":
@@ -1229,10 +1258,16 @@ def build_recommendation_answer(user_text: str, current: Dict) -> str:
 
     q = clean_text(user_text)
     explicit_cat = explicit_target_category_from_text(q)
+    current_group = product_category_group(current)
     if explicit_cat == "팬츠":
         tail = "상의와 연결했을 때 하체 라인을 정리해주고, 고객님 하의 사이즈 기준으로도 비교해볼 만한 팬츠들이에요."
+    elif explicit_cat in ["블라우스", "셔츠", "티셔츠", "니트"] and current_group == "skirt":
+        tail = "스커트와 연결했을 때 허리선을 살려주고, 전체 비율이 답답해 보이지 않는 상의들로 보시면 좋아요."
     elif any(k in q for k in ["출근", "회사", "오피스"]):
-        tail = "위 상품들은 출근룩 기준으로 너무 캐주얼하지 않고, 팬츠와 같이 입었을 때 전체 분위기가 단정하게 정리되는 쪽이에요."
+        if current_group == "skirt":
+            tail = "스커트와 같이 입었을 때 너무 캐주얼하지 않고, 전체 분위기가 단정하게 정리되는 쪽이에요."
+        else:
+            tail = "위 상품들은 출근룩 기준으로 너무 캐주얼하지 않고, 함께 입었을 때 전체 분위기가 단정하게 정리되는 쪽이에요."
     elif any(k in q for k in ["검정", "블랙"]):
         tail = "블랙 팬츠와 맞출 때는 상의나 아우터가 너무 무겁지 않게 정리되는 쪽이 좋아서, 밝은 톤이나 차분한 기본 컬러 위주로 보시면 실패가 적어요."
     elif intent == "alternative_recommend":
