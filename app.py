@@ -303,6 +303,20 @@ def detect_intent(user_text: str) -> str:
     if any(k in q for k in ["컬러", "색상", "무슨 색", "어떤 색", "블랙", "아이보리", "베이지", "브라운"]):
         return "color"
 
+    # 현재 상품 평가 질문은 추천 리스트보다 먼저 잡습니다.
+    # 예: "이 바지가 잘 어울릴까?", "이 옷 괜찮아?", "나한테 추천할 만해?"
+    # → 다른 상품 추천이 아니라 현재 상품의 적합성 상담입니다.
+    eval_no_space_words = [
+        "추천할만", "추천할만해", "추천할만한", "추천드릴만", "추천할수있", "추천해도될",
+        "괜찮을까", "괜찮아", "어울릴까", "어울려", "잘어울릴까",
+        "나한테맞", "저한테맞", "좋은선택", "좋은선택일까"
+    ]
+    current_item_words = ["이옷", "이상품", "이바지", "이팬츠", "이슬랙스", "이스커트", "이니트", "이셔츠", "이자켓", "이가디건"]
+    if any(k in no_space for k in eval_no_space_words):
+        return "fit_size"
+    if any(k in no_space for k in current_item_words) and any(k in no_space for k in ["입으면", "맞을까", "어울", "괜찮", "추천"]):
+        return "fit_size"
+
     # "추천해줘"는 리스트 추천이지만, "추천할 만해?", "나한테 추천할 만한 바지야?"는
     # 현재 보고 있는 상품이 고객에게 맞는지 평가해 달라는 의미입니다.
     # 이 분기를 먼저 잡아야 다른 상품 리스트 추천으로 새지 않습니다.
@@ -1035,7 +1049,7 @@ def is_current_product_evaluation_question(user_text: str) -> bool:
 
 def product_aware_fit_answer(user_text: str, current: Dict) -> str:
     q = clean_text(user_text)
-    if not any(k in q for k in ["힙", "골반", "허벅지", "하체", "다리", "짧", "키", "길이", "비율", "사이즈", "고르면", "맞을까", "어울릴까"]):
+    if not any(k in q for k in ["힙", "골반", "허벅지", "하체", "다리", "짧", "키", "길이", "비율", "사이즈", "고르면", "맞을까", "어울릴까", "어울려", "괜찮", "추천할", "추천드릴", "추천해도", "좋은 선택", "좋은선택", "나한테", "저한테"]):
         return ""
 
     name = current.get("product_name", "지금 보시는 상품")
@@ -1113,17 +1127,43 @@ def product_aware_fit_answer(user_text: str, current: Dict) -> str:
             f"{cut_text}{len_text}160cm 기준에서는 상의를 살짝 넣어 허리선을 만들면 다리가 더 길어 보이고, 신발은 납작한 것보다 앞코가 슬림한 타입이 잘 어울립니다."
         )
 
-    # 현재 팬츠/슬랙스에 대해 "나한테 추천할 만한가"를 묻는 경우는 다른 상품 추천이 아니라 현재 상품 평가입니다.
+    # 현재 팬츠/슬랙스에 대해 "나한테 어울릴까/추천할 만한가"를 묻는 경우는
+    # 다른 상품 추천이 아니라 현재 상품 평가입니다.
     if is_eval_current and (active_cat == "팬츠" or any(k in name for k in ["팬츠", "슬랙스", "바지", "데님", "청바지"])):
-        ratio_msg = "앵클 기장이라 발목선이 드러나면서 전체 비율이 답답해 보이지 않고," if (flags["short_length"] or "앵클" in name or "크롭" in blob) else "기장이 너무 끌리지 않게 맞추면 전체 비율이 답답해 보이지 않고,"
-        line_msg = "와이드 라인이라 힙과 허벅지를 자연스럽게 커버해줘서 하체 부담을 줄여주는 타입이에요." if (flags["wide"] or flags["semi_baggy"] or flags["pin_tuck"]) else "하체 라인이 너무 붙지 않게 떨어지는지 보시면 힙 부담을 줄이기 좋아요."
-        caution = "다만 기장이 발목선 아래로 애매하게 길어지면 키가 더 작아 보일 수 있으니, 모델컷처럼 발목선이 정리되는지 꼭 체크해보시면 좋아요."
-        compare = "평소 편하게 입으시는 팬츠의 총장과 힙 핏을 비교해보시면 실패 확률이 줄어요."
+        has_short_context = has_leg_ratio_question or any(k in recent_ctx for k in ["키", "작", "작은", "다리", "짧", "비율"])
+        has_hip_context = has_hip_question or any(k in recent_ctx for k in ["힙", "골반", "허벅지", "하체"])
+
+        if has_short_context and has_hip_context:
+            ratio_msg = "앵클 기장이라 발목이 드러나면서 전체 비율이 답답해 보이지 않고" if (flags["short_length"] or "앵클" in name or "크롭" in blob) else "기장을 발목선에 맞춰 입으면 전체 비율이 답답해 보이지 않고"
+            line_msg = "와이드 라인이라 힙과 허벅지를 자연스럽게 커버해줘서 하체 부담을 줄여주는 타입이에요" if (flags["wide"] or flags["semi_baggy"] or flags["pin_tuck"] or "와이드" in name) else "힙과 허벅지 라인이 너무 붙지 않게 떨어지는지 보면 하체 부담을 줄이기 좋아요"
+            caution = "다만 기장이 발목선 아래로 애매하게 길어지면 비율이 눌려 보일 수 있으니, 모델컷처럼 발목선이 정리되는지만 체크해보시면 좋아요."
+            compare = "평소 잘 입으시는 팬츠의 총장과 힙 핏을 비교해보시면 실패 확률이 줄어요."
+            return (
+                f"고객님처럼 키가 작고 힙이 있는 체형이라면 {particle_eun_neun(name)} 오히려 잘 맞는 쪽이에요. "
+                f"{ratio_msg}, {line_msg}. "
+                f"너무 타이트한 핏보다 이런 여유 있는 실루엣이 고객님 체형에는 훨씬 안정적으로 보이세요. "
+                f"{caution} {compare}"
+            )
+
+        if has_short_context:
+            ratio_msg = "앵클 기장이라 발목선이 드러나면서 전체 비율이 답답해 보이지 않는 장점이 있어요" if (flags["short_length"] or "앵클" in name or "크롭" in blob) else "기장을 발목선에 맞춰 입으면 전체 비율이 답답해 보이지 않아요"
+            return (
+                f"키가 크지 않은 편이셔도 {particle_eun_neun(name)}는 괜찮게 보실 수 있어요. "
+                f"{ratio_msg}. "
+                f"다만 기장이 너무 내려오면 작아 보일 수 있으니, 평소 잘 입는 팬츠 총장과 비교해보시면 실패 확률이 줄어요."
+            )
+
+        if has_hip_context:
+            line_msg = "와이드 라인이라 힙과 허벅지를 자연스럽게 커버해주는 쪽이에요" if (flags["wide"] or flags["semi_baggy"] or flags["pin_tuck"] or "와이드" in name) else "힙에서 너무 붙지 않게 떨어지는지 보는 게 중요해요"
+            return (
+                f"힙이 있으신 편이라면 {particle_eun_neun(name)}는 추천드릴 만한 쪽이에요. "
+                f"{line_msg}. "
+                f"허리만 맞추기보다 힙 통과감이 편한지 함께 보시면 실패가 적고, 평소 편하게 입는 팬츠의 힙 핏과 비교해보시면 좋아요."
+            )
+
         return (
-            f"고객님처럼 키가 작고 힙이 있는 체형이라면 {particle_eun_neun(name)} 오히려 추천드릴 만한 쪽이에요. "
-            f"{ratio_msg} {line_msg} "
-            f"너무 타이트한 핏보다 이런 여유 있는 실루엣이 고객님 체형에는 훨씬 안정적으로 보이세요. "
-            f"{caution} {compare}"
+            f"{particle_eun_neun(name)}는 고객님께 무난하게 추천드릴 만한 팬츠예요. "
+            f"다만 팬츠는 총장과 힙 핏에 따라 체감이 달라지니, 평소 잘 입는 팬츠와 기장·힙 여유를 비교해보시면 가장 정확해요."
         )
 
     if has_hip_question:
