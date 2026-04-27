@@ -368,6 +368,32 @@ def explicit_target_category_from_text(text: str) -> str:
     return ""
 
 
+def style_contexts_from_text(text: str) -> list:
+    q = clean_text(text)
+    ctx = []
+    if any(k in q for k in ["출근", "회사", "오피스", "업무"]):
+        ctx.append("office")
+    if any(k in q for k in ["여행", "휴가", "나들이", "장거리", "캐리어"]):
+        ctx.append("travel")
+    if any(k in q for k in ["모임", "하객", "격식", "약속", "식사"]):
+        ctx.append("formal")
+    if any(k in q for k in ["데일리", "일상", "편하게", "동네"]):
+        ctx.append("daily")
+    return ctx
+
+def is_dual_office_travel(text: str) -> bool:
+    ctx = style_contexts_from_text(text)
+    return "office" in ctx and "travel" in ctx
+
+def body_balance_focus(text: str) -> list:
+    q = clean_text(text)
+    focus = []
+    if any(k in q for k in ["상체는 말", "상체 말", "상체가 말", "상체 슬림", "상체는 빈약", "상체는 작은"]):
+        focus.append("상체볼륨")
+    if any(k in q for k in ["하체는 있", "하체 있", "하체가 있", "힙", "골반", "허벅지"]):
+        focus.append("하체분산")
+    return focus
+
 def size_ok_for_user(row: Dict, target_cat: str) -> bool:
     # Conservative: do not filter too hard; only block clear size miss for clothing
     b = body_context()
@@ -411,7 +437,30 @@ def row_category_matches(row: Dict, target_cat: str) -> bool:
 def product_reason_from_row(row: Dict, intent: str, user_text: str) -> str:
     name = clean_text(row.get("product_name", ""))
     blob = clean_text(f"{name} {row.get('product_summary','')} {row.get('fit_type','')} {row.get('body_cover_features','')} {row.get('style_tags','')} {row.get('fabric','')}")
-    if any(k in user_text for k in ["출근", "회사", "오피스"]):
+    q = clean_text(user_text)
+    dual = is_dual_office_travel(q)
+    body_focus = body_balance_focus(q)
+
+    if dual:
+        if any(k in blob for k in ["셔츠", "블라우스"]):
+            return "출근에는 단정하게, 여행에서는 소매를 가볍게 걷어 캐주얼하게 활용하기 좋아요"
+        if any(k in blob for k in ["티셔츠", "티", "니트"]):
+            return "여행에서는 편하고, 자켓이나 가디건을 더하면 출근룩으로도 정리되는 타입이에요"
+        if any(k in blob for k in ["가디건", "자켓", "재킷", "점퍼"]):
+            return "출근길에는 단정하게 걸치고, 여행지에서는 가볍게 들고 다니기 좋은 아이템이에요"
+        return "너무 포멀하지도 캐주얼하지도 않아 출근과 여행 사이의 균형을 잡기 좋아요"
+
+    if "상체볼륨" in body_focus and "하체분산" in body_focus:
+        if any(k in blob for k in ["카라", "배색", "벌룬", "소매", "패턴", "스트라이프"]):
+            return "시선이 위쪽으로 올라가 상체가 밋밋해 보이지 않고 하체 부담을 덜어줘요"
+        if any(k in blob for k in ["크롭", "숏", "세미루즈", "여유"]):
+            return "너무 길게 덮지 않아 비율이 답답하지 않고 하체와 균형을 맞추기 좋아요"
+
+    if any(k in q for k in ["더 시원", "시원", "여름", "통기", "쿨"]):
+        if any(k in blob for k in ["린넨", "메쉬", "쿨", "시어서커", "성근", "얇", "통기"]):
+            return "통기성 있는 소재감이라 더운 날에도 답답함을 줄여 입기 좋아요"
+
+    if any(k in q for k in ["출근", "회사", "오피스"]):
         if any(k in blob for k in ["셔츠", "블라우스"]):
             return "출근룩에 받쳐 입기 좋은 단정한 분위기예요"
         if any(k in blob for k in ["자켓", "재킷", "아우터"]):
@@ -419,7 +468,7 @@ def product_reason_from_row(row: Dict, intent: str, user_text: str) -> str:
     if any(k in blob for k in ["핀턱", "배기", "와이드", "여유"]):
         return "복부나 힙 라인을 너무 드러내지 않고 편하게 정리해줘요"
     if any(k in blob for k in ["셔츠", "블라우스"]):
-        return "팬츠와 매치했을 때 단정하고 깔끔하게 이어져요"
+        return "스커트나 팬츠와 매치했을 때 단정하고 깔끔하게 이어져요"
     if any(k in blob for k in ["자켓", "재킷"]):
         return "출근룩이나 모임룩에 단정한 외출 느낌을 더해줘요"
     if any(k in blob for k in ["가디건", "니트"]):
@@ -449,6 +498,11 @@ def find_candidates(intent: str, user_text: str, current: Dict, limit: int = 5) 
         cat = row_category(row)
         if target_cat and target_cat != "기타" and not row_category_matches(row, target_cat):
             continue
+        # 사용자가 니트를 명시했는데 가디건을 말하지 않은 경우, 추천이 아우터/가디건으로 새지 않게 니트류를 우선합니다.
+        if target_cat == "니트" and "가디건" not in q:
+            nm_blob = clean_text(f"{row.get('product_name','')} {row.get('category','')} {row.get('sub_category','')}")
+            if "가디건" in nm_blob and "니트" not in nm_blob:
+                continue
         if not size_ok_for_user(row, cat):
             continue
         sc = 1
@@ -462,8 +516,17 @@ def find_candidates(intent: str, user_text: str, current: Dict, limit: int = 5) 
         if any(k in q for k in ["출근", "학교", "상담", "단정"]):
             if any(k in blob for k in ["단정", "클래식", "슬랙스", "셔츠", "블라우스", "자켓"]):
                 sc += 2
-        if any(k in q for k in ["힙", "허벅지", "복부", "뱃살"]):
-            if any(k in blob for k in ["커버", "와이드", "배기", "핀턱", "여유", "허리라인"]):
+        if is_dual_office_travel(q):
+            if any(k in blob for k in ["셔츠", "블라우스", "티셔츠", "니트", "가디건", "자켓", "린넨", "쿨", "편안", "여유"]):
+                sc += 3
+        if any(k in q for k in ["더 시원", "시원", "여름", "통기", "쿨"]):
+            if any(k in blob for k in ["린넨", "메쉬", "쿨", "시어서커", "성근", "얇", "통기"]):
+                sc += 4
+        if "상체볼륨" in body_balance_focus(q):
+            if any(k in blob for k in ["카라", "배색", "벌룬", "소매", "패턴", "스트라이프", "크롭", "숏"]):
+                sc += 3
+        if any(k in q for k in ["힙", "허벅지", "복부", "뱃살", "하체"]):
+            if any(k in blob for k in ["커버", "와이드", "배기", "핀턱", "여유", "허리라인", "세미루즈"]):
                 sc += 2
         scored.append((sc, row))
     scored.sort(key=lambda x: -x[0])
@@ -1096,20 +1159,28 @@ def recommendation_heading(intent: str, user_text: str, current: Dict) -> str:
     q = clean_text(user_text)
     current_name = current.get("product_name", "지금 보시는 상품")
     explicit_cat = explicit_target_category_from_text(q)
+    dual = is_dual_office_travel(q)
     if explicit_cat == "팬츠":
         return "같이 입기 좋은 팬츠 쪽으로 골라드릴게요."
     if explicit_cat in ["블라우스", "셔츠", "티셔츠"]:
-        return "같이 입기 좋은 상의 쪽으로 골라드릴게요."
-    if explicit_cat in ["자켓", "니트"]:
+        return "출근과 여행 모두 활용하기 좋은 상의 쪽으로 골라드릴게요." if dual else "같이 입기 좋은 상의 쪽으로 골라드릴게요."
+    if explicit_cat == "니트":
+        if any(k in q for k in ["더 시원", "시원", "여름", "쿨"]):
+            return "더 시원하게 입기 좋은 니트 쪽으로 골라드릴게요."
+        if body_balance_focus(q):
+            return "체형 균형을 잡아주기 좋은 니트 쪽으로 골라드릴게요."
+        return "같이 입기 좋은 니트 쪽으로 골라드릴게요."
+    if explicit_cat == "자켓":
         return "바지 말고 전체 실루엣을 잡아줄 아우터 쪽으로 골라드릴게요." if any(k in q for k in ["바지말고", "바지 말고", "팬츠말고", "팬츠 말고", "대체"]) else "함께 걸치기 좋은 아우터 쪽으로 골라드릴게요."
     if explicit_cat == "신발":
         return "이 코디에 맞는 신발 쪽으로 골라드릴게요."
     if explicit_cat == "가방":
         return "전체 분위기에 맞는 가방 쪽으로 골라드릴게요."
+    if dual:
+        return "출근과 여행 모두에 활용하기 좋은 상품으로 골라드릴게요."
     if intent == "alternative_recommend":
         return f"{particle_wa_gwa(current_name)} 비슷한 무드에서 대안으로 볼 만한 상품이에요."
     return "같이 입기 좋은 상품으로 골라드릴게요."
-
 
 def fallback_reason_for_candidate(row: Dict, intent: str, user_text: str) -> str:
     return product_reason_from_row(row, intent, user_text)
@@ -1141,6 +1212,8 @@ def rank_candidates_with_gpt(user_text: str, current: Dict, intent: str, candida
     payload = {
         "user_text": user_text,
         "intent": intent,
+        "style_contexts": style_contexts_from_text(user_text),
+        "body_balance_focus": body_balance_focus(user_text),
         "customer_body": body_context(),
         "current_product": {
             "product_name": current.get("product_name", ""),
@@ -1150,7 +1223,7 @@ def rank_candidates_with_gpt(user_text: str, current: Dict, intent: str, candida
             "colors": current.get("colors", ""),
         },
         "candidate_products": candidate_payload,
-        "rule": "candidate_id 안에서만 3개를 고르고, 각 상품 추천 이유를 1문장으로 작성하세요. 상품명을 새로 만들지 마세요. 번호는 candidate_id만 사용하세요."
+        "rule": "candidate_id 안에서만 3개를 고르고, 각 상품 추천 이유를 1문장으로 작성하세요. 상품명을 새로 만들지 마세요. 번호는 candidate_id만 사용하세요. style_contexts가 여러 개면 한쪽 상황만 보지 말고 두 상황에 모두 맞는 활용 이유를 쓰세요. body_balance_focus가 있으면 체형 균형을 추천 이유에 반영하세요."
     }
 
     system = """
@@ -1261,8 +1334,14 @@ def build_recommendation_answer(user_text: str, current: Dict) -> str:
     current_group = product_category_group(current)
     if explicit_cat == "팬츠":
         tail = "상의와 연결했을 때 하체 라인을 정리해주고, 고객님 하의 사이즈 기준으로도 비교해볼 만한 팬츠들이에요."
+    elif explicit_cat == "니트" and body_balance_focus(q):
+        tail = "상체에 시선을 살짝 올려주고, 하체는 붙지 않는 하의와 맞추면 전체 균형이 더 안정적으로 보여요."
+    elif explicit_cat == "니트" and any(k in q for k in ["더 시원", "시원", "여름", "쿨"]):
+        tail = "마르 린넨 니트보다 가볍고 통기성 있는 쪽으로 비교해보시면 더운 날에도 부담이 적어요."
     elif explicit_cat in ["블라우스", "셔츠", "티셔츠", "니트"] and current_group == "skirt":
         tail = "스커트와 연결했을 때 허리선을 살려주고, 전체 비율이 답답해 보이지 않는 상의들로 보시면 좋아요."
+    elif is_dual_office_travel(q):
+        tail = "너무 딱딱하지도, 너무 캐주얼하지도 않은 중간 톤으로 보시면 출근과 여행 모두 활용도가 좋아요."
     elif any(k in q for k in ["출근", "회사", "오피스"]):
         if current_group == "skirt":
             tail = "스커트와 같이 입었을 때 너무 캐주얼하지 않고, 전체 분위기가 단정하게 정리되는 쪽이에요."
