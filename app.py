@@ -130,6 +130,7 @@ def safe_postprocess(answer: str, customer_call: str) -> str:
             out.append(p); seen.add(p)
     ans = " ".join(out).strip()
     ans = ans.replace("는는", "는").replace("은은", "은").replace("를를", "를").replace("을을", "을")
+    ans = ans.replace("괜챃", "괜찮").replace("디해서", "대해서")
     ans = re.sub(r"\s+", " ", ans).strip()
     return ans
 
@@ -301,6 +302,14 @@ def detect_intent(user_text: str) -> str:
         return "compare"
     if any(k in q for k in ["컬러", "색상", "무슨 색", "어떤 색", "블랙", "아이보리", "베이지", "브라운"]):
         return "color"
+
+    # "추천해줘"는 리스트 추천이지만, "추천할 만해?", "나한테 추천할 만한 바지야?"는
+    # 현재 보고 있는 상품이 고객에게 맞는지 평가해 달라는 의미입니다.
+    # 이 분기를 먼저 잡아야 다른 상품 리스트 추천으로 새지 않습니다.
+    if any(k in no_space for k in ["추천할만", "추천할만해", "추천할만한", "추천드릴만", "추천할수있", "추천해도될"]):
+        return "fit_size"
+    if ("나한테" in q or "저한테" in q or "나 같은" in q or "나같은" in q) and "추천" in q and not any(k in q for k in ["추천해줘", "추천해주세요", "골라줘", "골라주세요"]):
+        return "fit_size"
 
     explicit_cat = explicit_target_category_from_text(q)
     # 사용자가 특정 카테고리 + 추천/코디/어울림을 말하면, 현재 상품이 무엇이든 코디추천으로 처리
@@ -1006,6 +1015,24 @@ def measurement_value(current: Dict, keys: list) -> str:
                 return m.group(1)
     return ""
 
+def recent_user_context_text(limit: int = 6) -> str:
+    """이전 몇 개 고객 발화를 함께 보아 '나 같은 체형' 같은 이어 질문의 맥락을 보완합니다."""
+    try:
+        msgs = st.session_state.get("messages", [])[-limit:]
+        return " ".join(clean_text(m.get("content", "")) for m in msgs if m.get("role") == "user")
+    except Exception:
+        return ""
+
+def is_current_product_evaluation_question(user_text: str) -> bool:
+    q = clean_text(user_text)
+    no_space = q.replace(" ", "")
+    eval_words = ["추천할만", "추천할만해", "추천할만한", "추천드릴만", "추천해도될", "괜찮을까", "괜찮아", "어울릴까", "어울려", "나한테맞", "저한테맞", "좋은선택", "좋은 선택"]
+    if any(k in no_space for k in eval_words):
+        return True
+    if ("나한테" in q or "저한테" in q or "나 같은" in q or "나같은" in q) and "추천" in q and not any(k in q for k in ["추천해줘", "추천해주세요", "골라줘", "골라주세요"]):
+        return True
+    return False
+
 def product_aware_fit_answer(user_text: str, current: Dict) -> str:
     q = clean_text(user_text)
     if not any(k in q for k in ["힙", "골반", "허벅지", "하체", "다리", "짧", "키", "길이", "비율", "사이즈", "고르면", "맞을까", "어울릴까"]):
@@ -1028,6 +1055,15 @@ def product_aware_fit_answer(user_text: str, current: Dict) -> str:
     is_skirt = active_cat == "스커트" or any(k in name for k in ["스커트", "치마"])
     has_hip_question = any(k in q for k in ["힙", "골반", "허벅지", "하체"])
     has_leg_ratio_question = any(k in q for k in ["다리", "짧", "키", "길이", "비율"])
+
+    # "나 같은 사람", "추천할 만해?" 같은 이어 질문은 직전 대화의 체형 고민을 이어받습니다.
+    # 단, 추천 리스트가 아니라 현재 상품 평가로 처리합니다.
+    recent_ctx = clean_text(recent_user_context_text())
+    is_eval_current = is_current_product_evaluation_question(q)
+    if is_eval_current and any(k in recent_ctx for k in ["힙", "골반", "허벅지", "하체"]):
+        has_hip_question = True
+    if is_eval_current and any(k in recent_ctx for k in ["키", "작", "작은", "다리", "짧", "비율"]):
+        has_leg_ratio_question = True
 
     # 상의/셔츠/니트의 비율 상담은 하의·팬츠 로직으로 흘러가지 않도록 먼저 분리합니다.
     # 예: "다리가 짧은데 크롭 셔츠 괜찮을까?" → 상의 기장/허리선/하이웨스트 매치 기준으로 답합니다.
@@ -1077,6 +1113,19 @@ def product_aware_fit_answer(user_text: str, current: Dict) -> str:
             f"{cut_text}{len_text}160cm 기준에서는 상의를 살짝 넣어 허리선을 만들면 다리가 더 길어 보이고, 신발은 납작한 것보다 앞코가 슬림한 타입이 잘 어울립니다."
         )
 
+    # 현재 팬츠/슬랙스에 대해 "나한테 추천할 만한가"를 묻는 경우는 다른 상품 추천이 아니라 현재 상품 평가입니다.
+    if is_eval_current and (active_cat == "팬츠" or any(k in name for k in ["팬츠", "슬랙스", "바지", "데님", "청바지"])):
+        ratio_msg = "앵클 기장이라 발목선이 드러나면서 전체 비율이 답답해 보이지 않고," if (flags["short_length"] or "앵클" in name or "크롭" in blob) else "기장이 너무 끌리지 않게 맞추면 전체 비율이 답답해 보이지 않고,"
+        line_msg = "와이드 라인이라 힙과 허벅지를 자연스럽게 커버해줘서 하체 부담을 줄여주는 타입이에요." if (flags["wide"] or flags["semi_baggy"] or flags["pin_tuck"]) else "하체 라인이 너무 붙지 않게 떨어지는지 보시면 힙 부담을 줄이기 좋아요."
+        caution = "다만 기장이 발목선 아래로 애매하게 길어지면 키가 더 작아 보일 수 있으니, 모델컷처럼 발목선이 정리되는지 꼭 체크해보시면 좋아요."
+        compare = "평소 편하게 입으시는 팬츠의 총장과 힙 핏을 비교해보시면 실패 확률이 줄어요."
+        return (
+            f"고객님처럼 키가 작고 힙이 있는 체형이라면 {particle_eun_neun(name)} 오히려 추천드릴 만한 쪽이에요. "
+            f"{ratio_msg} {line_msg} "
+            f"너무 타이트한 핏보다 이런 여유 있는 실루엣이 고객님 체형에는 훨씬 안정적으로 보이세요. "
+            f"{caution} {compare}"
+        )
+
     if has_hip_question:
         if is_top_like:
             db = current.get("db") or get_db_product(current.get("product_no", "")) or {}
@@ -1120,7 +1169,7 @@ def product_aware_fit_answer(user_text: str, current: Dict) -> str:
             len_text = f" 총장 {length}cm 기준으로" if length else ""
             return (
                 f"다리 비율이 걱정되신다면 {particle_eun_neun(name)} 오히려 괜찮게 보실 수 있어요."
-                f"{len_text} 일반 롱 슬랙스처럼 길게 끌리는 타입보다 살짝 짧고 딱 떨어지는 세미 배기핏이라, "
+                f"{len_text} 일반 롱 슬랙스처럼 길게 끌리는 타입보다 발목선이 정리되는 앵클 기장이라, "
                 f"수선 없이 입었을 때 발목선이 정리되면 다리가 답답해 보이지 않는 장점이 있어요. "
                 f"다만 체감 길이는 고객님이 평소 즐겨 입는 팬츠 총장, 이 상품의 총장, 그리고 상세페이지 모델컷의 떨어지는 위치를 함께 비교해보시면 가장 정확합니다."
             )
