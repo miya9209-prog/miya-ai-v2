@@ -22,7 +22,7 @@ st.set_page_config(page_title="픽톡", layout="centered", initial_sidebar_state
 # =========================================================
 # 기본 설정
 # =========================================================
-APP_VERSION = "GPT-CENTERED-V2-20260427-UI-FITFIX"
+APP_VERSION = "GPT-CENTERED-V2-20260427-CONSISTENCY-LOCK"
 PRODUCT_DB_PATH = "misharp_miya_db.csv"
 REVIEW_SUMMARY_PATH = "review_summary.json"
 MODEL_PROFILES_PATH = "model_profiles.json"
@@ -541,13 +541,137 @@ def build_system_prompt() -> str:
 6. 66/77 같은 권장사이즈와 실측을 혼동하지 않는다. 권장사이즈는 가능 여부, 실측은 핏 체감 설명에만 쓴다. 배기/세미배기/와이드/부츠컷/일자/라글란/롱/하프 같은 상품 실루엣 특성을 고객 체형 고민과 반드시 연결해서 설명한다.
 7. 고객 이름이 있으면 자연스럽게 이름+님으로 부른다. 없으면 고객님이라고 한다.
 8. 모델 이름은 말하지 않는다. 필요하면 '상세페이지 모델컷 기준'으로만 말한다.
-9. 반복 문장을 피하고, 3~6문장으로 답한다. 사이즈/길이 상담 마지막에는 자연스럽게 '평소 즐겨 입는 팬츠 길이·허리·힙 실측과 비교하면 가장 정확하다'는 식의 선택 기준을 제안한다.
+9. 반복 문장을 피하고, 3~6문장으로 답한다. 마지막 선택 기준은 반드시 현재 상품 카테고리에 맞춘다. 상의/셔츠/니트는 상의 기장·가슴·어깨·밑단 위치를 기준으로 말하고, 팬츠/슬랙스/데님은 허리·힙·허벅지·총장을 기준으로 말하며, 스커트는 허리선·힙 통과감·기장·퍼짐을 기준으로 말한다. 상의 상담 중 팬츠 실측이나 슬랙스 핏을 판단 기준으로 끌고 오지 않는다.
 10. 금지 표현: {', '.join(FORBIDDEN_PHRASES)}
+11. user 메시지 안의 consultation_lock이 있으면 그 기준을 답변 끝까지 유지한다. allowed_focus 안의 기준만 사용하고, forbidden_logic에 있는 방향으로 흐르지 않는다.
 
 답변 톤:
 - 친구 같은 MD 말투.
 - '입는 건 가능해요', '다만 힙이 있는 편이면', '실패 적게 가시려면', '이쪽이 더 안전해요' 같은 자연스러운 표현을 쓴다.
 """.strip()
+
+
+# =========================================================
+# 상담 일관성 락: 질문 의도와 현재 상품 카테고리를 끝까지 유지
+# =========================================================
+def is_ratio_question(user_text: str) -> bool:
+    q = clean_text(user_text)
+    return any(k in q for k in ["다리 짧", "다리가 짧", "키에 비해", "비율", "다리 길", "길어 보", "짧아 보"])
+
+def is_hip_question(user_text: str) -> bool:
+    q = clean_text(user_text)
+    return any(k in q for k in ["힙", "골반", "엉덩", "허벅지", "하체"])
+
+def is_bust_question(user_text: str) -> bool:
+    q = clean_text(user_text)
+    return any(k in q for k in ["가슴", "상체", "바스트", "품", "부해"])
+
+def product_category_group(current: Dict) -> str:
+    """상담 기준용 넓은 카테고리. 추천 카테고리는 기존 로직을 그대로 둡니다."""
+    name = clean_text(current.get("product_name", ""))
+    cat = clean_text(current.get("category", ""))
+    try:
+        blob = current_product_blob(current)
+    except Exception:
+        blob = f"{name} {cat}"
+    text = f"{cat} {name} {blob}"
+
+    if any(k in text for k in ["스커트", "치마"]):
+        return "skirt"
+    if any(k in text for k in ["원피스", "드레스"]):
+        return "dress"
+    if any(k in text for k in ["팬츠", "슬랙스", "바지", "청바지", "데님", "반바지", "쇼츠"]):
+        return "bottom"
+    if any(k in text for k in ["자켓", "재킷", "점퍼", "코트", "아우터", "야상"]):
+        return "outer"
+    if any(k in text for k in ["조끼", "베스트"]):
+        return "vest"
+    if any(k in text for k in ["니트", "가디건", "맨투맨", "티셔츠", "티", "블라우스", "셔츠", "탑"]):
+        return "top"
+    return "unknown"
+
+def build_consultation_lock(user_text: str, current: Dict) -> Dict:
+    group = product_category_group(current)
+    intent = detect_intent(user_text)
+    concerns = []
+    if is_ratio_question(user_text): concerns.append("ratio")
+    if is_hip_question(user_text): concerns.append("hip")
+    if is_bust_question(user_text): concerns.append("bust")
+
+    allowed = []
+    forbidden = []
+    if group in ["top", "vest"]:
+        allowed = ["상의 기장", "허리선", "밑단 위치", "가슴둘레", "어깨", "여유핏", "하이웨스트 코디"]
+        forbidden = ["팬츠 실측", "팬츠 총장", "슬랙스 핏", "세미 배기핏", "허벅지 실측", "밑위", "하의 사이즈 기준"]
+    elif group == "outer":
+        allowed = ["이너 위 착용감", "어깨", "가슴둘레", "소매", "총장", "부해 보임", "레이어드"]
+        forbidden = ["팬츠 실측", "팬츠 총장", "허벅지 실측", "밑위", "하의 사이즈 기준"]
+    elif group == "skirt":
+        allowed = ["허리선", "힙 통과감", "플레어", "절개선", "기장", "시선 분산", "비율"]
+        forbidden = ["팬츠 실측", "팬츠 총장", "배기핏", "슬랙스 핏", "허벅지 실측", "밑위"]
+    elif group == "dress":
+        allowed = ["어깨", "가슴둘레", "허리선", "힙 통과감", "총장", "실루엣"]
+        forbidden = ["팬츠 실측", "팬츠 총장", "배기핏", "슬랙스 핏", "허벅지 실측", "밑위"]
+    elif group == "bottom":
+        allowed = ["허리", "힙", "허벅지", "밑위", "총장", "밑단", "핏", "기장"]
+        forbidden = ["상의 가슴둘레 기준", "어깨 기준"]
+
+    return {
+        "category_group": group,
+        "intent": intent,
+        "concerns": concerns,
+        "allowed_focus": allowed,
+        "forbidden_logic": forbidden,
+        "rule": "현재 상품 카테고리 기준을 답변 끝까지 유지하고, 다른 카테고리의 실측·핏 판단 기준으로 넘어가지 않는다."
+    }
+
+def has_category_drift(answer: str, lock: Dict) -> bool:
+    ans = clean_text(answer)
+    group = lock.get("category_group", "")
+    concerns = lock.get("concerns", [])
+
+    if group in ["top", "vest", "outer"] and "ratio" in concerns:
+        drift_patterns = [
+            "팬츠 길이", "팬츠 총장", "바지 길이", "바지 총장", "슬랙스", "배기핏", "세미 배기", "허벅지 실측", "밑위",
+            "평소 입는 팬츠", "평소 입는 바지", "팬츠의 총장", "하의 사이즈 기준"
+        ]
+        return any(p in ans for p in drift_patterns)
+
+    if group == "skirt":
+        drift_patterns = ["팬츠 실측", "팬츠 총장", "바지 총장", "배기핏", "슬랙스 핏", "허벅지 실측", "밑위"]
+        return any(p in ans for p in drift_patterns)
+
+    if group in ["top", "vest", "outer"] and "hip" in concerns:
+        drift_patterns = ["허벅지 실측", "밑위", "팬츠 실측", "팬츠 총장", "슬랙스 핏", "배기핏"]
+        return any(p in ans for p in drift_patterns)
+
+    return False
+
+def enforce_consultation_consistency(answer: str, user_text: str, current: Dict) -> str:
+    """GPT가 처음에는 맞게 가다가 마지막에 다른 카테고리 기준으로 흐를 때 안전 답변으로 되돌립니다."""
+    lock = build_consultation_lock(user_text, current)
+    if not has_category_drift(answer, lock):
+        return answer
+
+    fixed = product_aware_fit_answer(user_text, current)
+    if fixed:
+        return fixed
+
+    name = current.get("product_name", "지금 보시는 상품")
+    group = lock.get("category_group", "")
+    if group in ["top", "vest"] and is_ratio_question(user_text):
+        return (
+            f"다리 비율이 걱정되신다면 {particle_eun_neun(name)} 상의 기장과 밑단 위치를 중심으로 보시면 좋아요. "
+            f"상의 끝선이 너무 아래로 길게 내려오지 않으면 허리선이 살아나서 다리가 더 길어 보이는 효과가 있습니다. "
+            f"하이웨스트 라인으로 맞추면 전체 비율이 더 안정적으로 보이고. 판단 기준은 다른 옷의 실측이 아니라 이 셔츠의 기장과 밑단 위치로 보시면 좋아요."
+        )
+    if group == "skirt":
+        return (
+            f"힙이나 다리 비율이 신경 쓰이신다면 {particle_eun_neun(name)} 허리선, 힙 통과감, 기장 흐름을 같이 보시면 좋아요. "
+            f"스커트는 팬츠처럼 허벅지 실측을 보는 것보다 힙에서 당김 없이 지나가고 밑단이 자연스럽게 퍼지는지가 더 중요합니다. "
+            f"상의를 살짝 넣어 허리선을 만들면 전체 비율도 더 좋아 보이실 거예요."
+        )
+    return answer
 
 def build_context_payload(intent: str, user_text: str, current: Dict) -> Dict:
     selected = st.session_state.selected_product or {}
@@ -607,6 +731,7 @@ def build_context_payload(intent: str, user_text: str, current: Dict) -> Dict:
         },
         "selected_product": selected,
         "allowed_candidates": allowed,
+        "consultation_lock": build_consultation_lock(user_text, current),
         "model_hint": model_hint(),
         "recent_messages": st.session_state.messages[-8:],
         "situation_context": st.session_state.situation_context,
@@ -791,10 +916,11 @@ def measurement_value(current: Dict, keys: list) -> str:
 
 def product_aware_fit_answer(user_text: str, current: Dict) -> str:
     q = clean_text(user_text)
-    if not any(k in q for k in ["힙", "골반", "허벅지", "하체", "다리", "짧", "키", "길이", "사이즈", "고르면", "맞을까", "어울릴까"]):
+    if not any(k in q for k in ["힙", "골반", "허벅지", "하체", "다리", "짧", "키", "길이", "비율", "사이즈", "고르면", "맞을까", "어울릴까"]):
         return ""
 
     name = current.get("product_name", "지금 보시는 상품")
+    blob = current_product_blob(current)
     flags = detect_silhouette(current)
     bottom = st.session_state.get("body_bottom", "")
     height = st.session_state.get("body_height", "")
@@ -823,13 +949,13 @@ def product_aware_fit_answer(user_text: str, current: Dict) -> str:
                 f"다리 비율이 걱정되신다면 {particle_eun_neun(name)} 오히려 괜찮게 보실 수 있어요. "
                 f"크롭 기장이라 상의 끝선이 아래로 길게 내려오지 않고, 허리선 쪽으로 시선이 올라가서 다리가 더 길어 보이는 효과가 있습니다. "
                 f"{height_text}{len_text}부담스러운 짧은 크롭이라기보다 비율을 정리해주는 상의로 보시면 좋아요. "
-                f"하의는 하이웨스트 팬츠나 스커트와 맞추면 허리선이 살아나서 전체 비율이 더 안정적으로 보입니다."
+                f"하의는 하이웨스트 라인으로 맞추면 허리선이 살아나서 전체 비율이 더 안정적으로 보입니다."
             )
         else:
             base = (
                 f"다리 비율이 걱정되실 때는 {particle_eun_neun(name)}의 상의 기장과 밑단 위치를 먼저 보시면 좋아요. "
                 f"상의가 너무 길게 내려오면 하체가 짧아 보일 수 있어서, 앞부분을 살짝 넣거나 허리선을 만들어 입으면 비율이 훨씬 좋아 보입니다. "
-                f"{height_text}{len_text}하이웨스트 하의와 연결하시면 다리선이 더 길어 보이게 연출하실 수 있어요."
+                f"{height_text}{len_text}하이웨스트 라인으로 연결하시면 다리선이 더 길어 보이게 연출하실 수 있어요."
             )
 
         if has_hip_question:
@@ -1349,6 +1475,7 @@ if user_input:
         answer = fallback_answer(user_input, current)
 
     if not is_recommendation_html:
+        answer = enforce_consultation_consistency(answer, user_input, current)
         answer = safe_postprocess(answer, customer_call())
     st.session_state.messages.append({"role":"assistant", "content":answer})
     st.rerun()
