@@ -92,8 +92,9 @@ def detect_category(text: str) -> str:
     if "가디건" in c: return "가디건"
     if "니트" in c: return "니트"
     if any(w in c for w in ["자켓", "재킷", "점퍼", "코트", "조끼", "베스트", "아우터", "후드", "야상"]): return "자켓"
-    if any(w in c for w in ["팬츠", "슬랙스", "바지", "데님", "청바지"]): return "팬츠"
+    # "데님 스커트"처럼 데님이라는 단어가 함께 있어도 스커트는 스커트로 먼저 분류합니다.
     if any(w in c for w in ["스커트", "치마"]): return "스커트"
+    if any(w in c for w in ["팬츠", "슬랙스", "바지", "데님", "청바지"]): return "팬츠"
     return "기타"
 
 def tokens(text: str) -> List[str]:
@@ -809,6 +810,31 @@ def product_aware_fit_answer(user_text: str, current: Dict) -> str:
     is_skirt = active_cat == "스커트" or any(k in name for k in ["스커트", "치마"])
     has_hip_question = any(k in q for k in ["힙", "골반", "허벅지", "하체"])
     has_leg_ratio_question = any(k in q for k in ["다리", "짧", "키", "길이", "비율"])
+
+    # 상의/셔츠/니트의 비율 상담은 하의·팬츠 로직으로 흘러가지 않도록 먼저 분리합니다.
+    # 예: "다리가 짧은데 크롭 셔츠 괜찮을까?" → 상의 기장/허리선/하이웨스트 매치 기준으로 답합니다.
+    if is_top_like and has_leg_ratio_question:
+        is_crop_top = any(k in blob for k in ["크롭", "짧은 기장", "짧게", "숏", "허리선"]) or any(k in name for k in ["크롭", "숏"])
+        len_text = f"총장 {length}cm 기준으로 " if length else ""
+        height_text = f"{height}cm 기준에서도 " if height else ""
+
+        if is_crop_top:
+            base = (
+                f"다리 비율이 걱정되신다면 {particle_eun_neun(name)} 오히려 괜찮게 보실 수 있어요. "
+                f"크롭 기장이라 상의 끝선이 아래로 길게 내려오지 않고, 허리선 쪽으로 시선이 올라가서 다리가 더 길어 보이는 효과가 있습니다. "
+                f"{height_text}{len_text}부담스러운 짧은 크롭이라기보다 비율을 정리해주는 상의로 보시면 좋아요. "
+                f"하의는 하이웨스트 팬츠나 스커트와 맞추면 허리선이 살아나서 전체 비율이 더 안정적으로 보입니다."
+            )
+        else:
+            base = (
+                f"다리 비율이 걱정되실 때는 {particle_eun_neun(name)}의 상의 기장과 밑단 위치를 먼저 보시면 좋아요. "
+                f"상의가 너무 길게 내려오면 하체가 짧아 보일 수 있어서, 앞부분을 살짝 넣거나 허리선을 만들어 입으면 비율이 훨씬 좋아 보입니다. "
+                f"{height_text}{len_text}하이웨스트 하의와 연결하시면 다리선이 더 길어 보이게 연출하실 수 있어요."
+            )
+
+        if has_hip_question:
+            base += " 힙도 함께 신경 쓰이신다면 상의를 전부 길게 덮기보다는 앞은 살짝 정리하고, 뒤 라인이 자연스럽게 떨어지는 코디가 더 예쁘게 보입니다."
+        return base
 
     # 스커트 체형 상담은 팬츠식 표현이 섞이지 않도록 상품 구조 기준으로만 답합니다.
     if is_skirt and (has_hip_question or has_leg_ratio_question):
