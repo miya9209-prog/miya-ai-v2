@@ -769,6 +769,8 @@ def detect_silhouette(current: Dict) -> Dict:
         "pin_tuck": any(k in blob for k in ["핀턱", "턱"]),
         "raglan": any(k in blob for k in ["라글란"]),
         "half_length_top": any(k in blob for k in ["하프", "힙을 덮", "힙 덮", "롱셔츠"]),
+        "flare": any(k in blob for k in ["플레어", "A라인", "에이라인", "훌", "퍼지는"]),
+        "unbalance": any(k in blob for k in ["언밸런스", "사선", "절개", "비대칭"]),
     }
     return flags
 
@@ -804,7 +806,34 @@ def product_aware_fit_answer(user_text: str, current: Dict) -> str:
     # 실제 길이감과 커버 체감 중심으로 답합니다.
     active_cat = current.get("category", "") or detect_category(name)
     is_top_like = active_cat in ["니트", "가디건", "블라우스", "셔츠", "티셔츠", "맨투맨", "자켓"] or any(k in name for k in ["니트", "가디건", "블라우스", "셔츠", "티셔츠", "맨투맨", "자켓", "점퍼", "조끼"])
-    if any(k in q for k in ["힙", "골반", "허벅지", "하체"]):
+    is_skirt = active_cat == "스커트" or any(k in name for k in ["스커트", "치마"])
+    has_hip_question = any(k in q for k in ["힙", "골반", "허벅지", "하체"])
+    has_leg_ratio_question = any(k in q for k in ["다리", "짧", "키", "길이", "비율"])
+
+    # 스커트 체형 상담은 팬츠식 표현이 섞이지 않도록 상품 구조 기준으로만 답합니다.
+    if is_skirt and (has_hip_question or has_leg_ratio_question):
+        len_text = f"총장 {length}cm 기준으로 " if length else ""
+        flare_text = "플레어 라인이라 힙에서 바로 붙지 않고 아래로 자연스럽게 퍼지는 편이에요. " if flags["flare"] else "스커트 라인이 하체를 딱 붙여 드러내는 쪽보다는 자연스럽게 흐르는 편인지 보시면 좋아요. "
+        cut_text = "언밸런스 절개선이 시선을 사선으로 분산시켜줘서 다리 비율도 덜 답답해 보여요. " if flags["unbalance"] else "절개선이나 밑단 위치가 시선을 아래로 자연스럽게 흘려주면 다리 비율이 더 좋아 보여요. "
+        size_text = f"{bottom or '66반'} 기준이면 허리만 맞추기보다 힙에서 당김 없이 떨어지는지를 같이 보시면 좋아요. "
+        if has_hip_question and has_leg_ratio_question:
+            return (
+                f"고객님처럼 힙이 있으시고 다리 길이도 신경 쓰이신다면 {particle_eun_neun(name)} 오히려 괜찮게 보실 수 있어요. "
+                f"{flare_text}{cut_text}{len_text}160cm 전후에서는 상의를 너무 길게 덮기보다 살짝 넣거나 짧은 상의와 맞추면 비율이 더 좋아 보입니다. "
+                f"{size_text}너무 타이트하게 잡기보다는 힙선이 부드럽게 지나가는 사이즈를 추천드릴게요."
+            )
+        if has_hip_question:
+            return (
+                f"{bottom or '66반'} 기준으로 힙이 신경 쓰이신다면 {particle_eun_neun(name)}는 힙에 딱 붙는 H라인보다 부담이 적은 쪽으로 보시면 좋아요. "
+                f"{flare_text}{len_text}허리선은 안정적으로 잡고, 힙 아래로는 자연스럽게 퍼지는지 체크하시면 실패가 적습니다. "
+                f"힙 라인을 감추고 싶으시면 상의는 너무 길게 덮기보다 허리선을 살짝 살리는 코디가 더 예뻐요."
+            )
+        return (
+            f"다리 비율이 걱정되시면 {particle_eun_neun(name)}는 기장과 절개선 위치를 같이 보시는 게 좋아요. "
+            f"{cut_text}{len_text}160cm 기준에서는 상의를 살짝 넣어 허리선을 만들면 다리가 더 길어 보이고, 신발은 납작한 것보다 앞코가 슬림한 타입이 잘 어울립니다."
+        )
+
+    if has_hip_question:
         if is_top_like:
             db = current.get("db") or get_db_product(current.get("product_no", "")) or {}
             length_type = clean_text(db.get("length_type", "") or current.get("length_type", ""))
@@ -1183,6 +1212,49 @@ footer{visibility:hidden;}
 .rec-tail{margin-top:8px;line-height:1.55;}
 .label{font-size:12px;color:#666;margin:8px 0 3px;font-weight:700;}
 .stTextInput input, .stSelectbox div[data-baseweb="select"]{border-radius:12px;}
+/* 사이즈 입력칸 2×2 고정: Streamlit 모바일 자동 1열 전환 강제 해제 */
+div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"],
+div[data-testid="stHorizontalBlock"]{
+    display:grid !important;
+    grid-template-columns:minmax(0,1fr) minmax(0,1fr) !important;
+    column-gap:12px !important;
+    row-gap:0 !important;
+    width:100% !important;
+    align-items:start !important;
+}
+div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"] > div,
+div[data-testid="stHorizontalBlock"] > div,
+div[data-testid="stExpander"] div[data-testid="column"],
+div[data-testid="column"],
+.stColumn{
+    width:100% !important;
+    min-width:0 !important;
+    max-width:100% !important;
+    flex:initial !important;
+}
+div[data-testid="stExpander"] .stTextInput input,
+div[data-testid="stExpander"] .stSelectbox div[data-baseweb="select"]{
+    min-width:0 !important;
+    width:100% !important;
+}
+@media (max-width: 900px){
+    div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"],
+    div[data-testid="stHorizontalBlock"]{
+        display:grid !important;
+        grid-template-columns:minmax(0,1fr) minmax(0,1fr) !important;
+        column-gap:10px !important;
+    }
+    div[data-testid="stExpander"] div[data-testid="stHorizontalBlock"] > div,
+    div[data-testid="stHorizontalBlock"] > div,
+    div[data-testid="column"],
+    .stColumn{
+        width:100% !important;
+        min-width:0 !important;
+        max-width:100% !important;
+        flex:initial !important;
+    }
+}
+
 </style>
 """, unsafe_allow_html=True)
 
