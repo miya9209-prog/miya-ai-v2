@@ -1487,6 +1487,8 @@ def recommendation_heading(intent: str, user_text: str, current: Dict, candidate
     explicit_cat = explicit_target_category_from_text(q, _current_cat)
     dual = is_dual_office_travel(q)
     if explicit_cat == "팬츠":
+        if intent == "alternative_recommend":
+            return f"{particle_wa_gwa(current_name)} 대신 비교해볼 만한 팬츠로 골라드릴게요."
         return "같이 입기 좋은 팬츠 쪽으로 골라드릴게요."
     if explicit_cat in ["블라우스", "셔츠", "티셔츠"]:
         return "출근과 여행 모두 활용하기 좋은 상의 쪽으로 골라드릴게요." if dual else "같이 입기 좋은 상의 쪽으로 골라드릴게요."
@@ -1663,7 +1665,12 @@ def build_recommendation_answer(user_text: str, current: Dict) -> str:
     _rec_cats = [row_category(r) for r in candidates[:3]] if candidates else []
     _dom_cat = _rec_cats[0] if _rec_cats else ""
     if explicit_cat == "팬츠" and _dom_cat not in ["블라우스", "셔츠", "니트", "자켓", "아우터"]:
-        tail = "상의와 연결했을 때 하체 라인을 정리해주고, 고객님 하의 사이즈 기준으로도 비교해볼 만한 팬츠들이에요."
+        if intent == "alternative_recommend":
+            # 현재 팬츠 대신 다른 팬츠 추천 → 비교 관점 tail
+            tail = "비슷한 핏 안에서 비교하실 때는 총장·허리·힙 실측을 같이 보시면 선택이 더 정확해요."
+        else:
+            # 코디용 팬츠 추천 → 기존 상의 연결 관점 tail
+            tail = "상의와 연결했을 때 하체 라인을 정리해주고, 고객님 하의 사이즈 기준으로도 비교해볼 만한 팬츠들이에요."
     elif explicit_cat == "니트" and body_balance_focus(q):
         tail = "상체에 시선을 살짝 올려주고, 하체는 붙지 않는 하의와 맞추면 전체 균형이 더 안정적으로 보여요."
     elif explicit_cat == "니트" and any(k in q for k in ["더 시원", "시원", "여름", "쿨"]):
