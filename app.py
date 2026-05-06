@@ -1111,7 +1111,72 @@ def fast_length_answer(user_text: str, current: Dict) -> str:
             f"키가 어느 정도 되세요? 알려주시면 더 정확히 추천드릴게요.")
 
 
+
+def is_multi_question(user_text: str) -> bool:
+    """복수 질문 여부 감지. '사이즈도 + 길이도' 같은 복합 질문."""
+    q = clean_text(user_text)
+    has_size = any(k in q for k in ["사이즈", "어떤 사이즈", "몇 사이즈", "무슨 사이즈", "m", "l", "뭐로"])
+    has_length = any(k in q for k in ["길이", "기장", "단", "롱", "숏"])
+    has_choice = any(k in q for k in ["추천", "좋을까", "어떤", "골라"])
+    return has_size and has_length and has_choice
+
+
+def fast_combined_answer(user_text: str, current: Dict) -> str:
+    """
+    복합 질문(사이즈 + 길이 동시)을 한 번에 답변.
+    예) "어떤 사이즈가 좋을까? 길이도 추천해줘"
+    """
+    if not is_multi_question(user_text):
+        return ""
+
+    q = clean_text(user_text)
+    name = current.get("product_name") or "지금 보시는 상품"
+    call = customer_call()
+
+    # 사이즈 파트
+    bottom = clean_text(st.session_state.get("body_bottom", ""))
+    has_hip = any(k in q for k in ["힙", "골반", "허벅지", "하체"])
+
+    if bottom == "66반":
+        if has_hip:
+            size_ans = f"사이즈는 힙이 있으신 편이면 L 쪽이 더 안전해요."
+        else:
+            size_ans = f"사이즈는 M은 깔끔하게 맞는 쪽, L은 좀 더 편한 쪽이에요."
+    elif bottom in ["55", "55반"]:
+        size_ans = f"사이즈는 기본 사이즈(S~M)부터 보셔도 좋아요."
+    elif bottom in ["77", "77반", "88"]:
+        size_ans = f"사이즈는 {bottom} 기준으로 가능한 옵션 중 큰 쪽을 먼저 추천드려요."
+    else:
+        size_ans = f"사이즈는 평소 입으시는 사이즈 기준으로 보시면 돼요."
+
+    # 길이 파트
+    height = clean_text(st.session_state.get("body_height", ""))
+    try:
+        h = int(height.replace("cm", "").strip()) if height else 0
+    except (ValueError, AttributeError):
+        h = 0
+
+    if h > 0:
+        if h <= 160:
+            length_ans = f"길이는 키 {h}cm이시면 숏·단 기장을 추천드려요. 롱은 끌릴 수 있고, 단 기장이 다리가 길어 보여요."
+        elif h <= 165:
+            length_ans = f"길이는 키 {h}cm이시면 단·롱 모두 가능해요. 굽 있는 신발이면 롱, 플랫이면 단이 더 안정적이에요."
+        else:
+            length_ans = f"길이는 키 {h}cm이시면 롱도 예쁘게 소화하실 수 있어요. 출근·격식은 롱, 데일리는 단도 좋아요."
+    else:
+        length_ans = "길이는 키와 신발 굽을 함께 고려하시면 좋아요. 160cm 이하면 단 기장이 비율상 유리해요."
+
+    return f"{call}, {size_ans} {length_ans}"
+
 def fast_answer(user_text: str, current: Dict) -> str:
+    # 복합 질문(사이즈+길이 동시) 처리 — 가장 먼저
+    try:
+        ans = fast_combined_answer(user_text, current)
+        if ans:
+            return safe_postprocess(ans, customer_call())
+    except Exception:
+        pass
+
     # 길이 선택 질문은 가장 먼저 처리 (키 정보 활용)
     try:
         ans = fast_length_answer(user_text, current)
