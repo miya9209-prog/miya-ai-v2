@@ -22,7 +22,7 @@ st.set_page_config(page_title="픽톡", layout="centered", initial_sidebar_state
 # =========================================================
 # 기본 설정
 # =========================================================
-APP_VERSION = "GPT-CENTERED-V2-20260427-CONSISTENCY-LOCK"
+APP_VERSION = "GPT-INTENT-V3-20260507-NATURAL-LANG-INTENT"
 PRODUCT_DB_PATH = "misharp_miya_db.csv"
 REVIEW_SUMMARY_PATH = "review_summary.json"
 MODEL_PROFILES_PATH = "model_profiles.json"
@@ -194,6 +194,7 @@ def ensure_state():
         "situation_context": "",
         "last_user_intent": "",
         "last_error": "",
+        "intent_cache": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -285,65 +286,133 @@ def fetch_product_context(url: str, product_no: str = "", product_name: str = ""
     return {"product_no": pno, "product_name": name or "지금 보시는 상품", "category": detect_category(name + " " + crawl_text), "summary":"", "fit":"", "size_range":"", "colors":"", "db": None, "crawl_text": crawl_text}
 
 # =========================================================
-# 의도 분석: GPT 중심이지만 라우터는 상담축만 결정
+# 의도 분석: GPT가 자연어로 의도 판단 (규칙은 즉답 케이스만)
 # =========================================================
-def detect_intent(user_text: str) -> str:
+
+# ── 즉답 가능한 케이스: GPT 호출 없이 규칙으로 처리 ──────
+def _rule_intent(user_text: str):
+    """
+    GPT 없이 확실히 판단 가능한 케이스만 처리.
+    명확하지 않으면 None 반환 → GPT로 넘김.
+    """
     q = clean_text(user_text)
     no_space = q.replace(" ", "")
-    if no_space in {"응", "네", "넵", "좋아", "그래", "ㅇㅇ", "어"}:
+
+    # 단답 긍정
+    if no_space in {"응", "네", "넵", "좋아", "그래", "ㅇㅇ", "어", "오케이", "ok", "ㅇㅋ"}:
         return "affirm"
+    # 번호 선택
     if re.search(r"[123]번|첫 ?번째|두 ?번째|세 ?번째", q):
         return "followup_selected"
-    if any(k in q for k in ["일자", "부츠컷", "숏", "롱", "타입", "기본형", "와이드형"]):
+    # 옵션 선택 (일자/부츠컷 등 스타일 타입 직접 언급)
+    if re.search(r"^(일자|부츠컷|숏|롱|기본형|와이드형)$", no_space):
         return "option_choice"
-    if any(k in q for k in ["장점", "특징", "왜 좋아", "뭐가 좋아", "좋은 점"]):
-        return "feature"
-    if any(k in q for k in ["비교", "둘 중", "뭐가 더", "어느 게", "어느게"]):
-        return "compare"
-    if any(k in q for k in ["컬러", "색상", "무슨 색", "어떤 색", "블랙", "아이보리", "베이지", "브라운"]):
-        return "color"
-
-    # 현재 상품 평가 질문은 추천 리스트보다 먼저 잡습니다.
-    # 예: "이 바지가 잘 어울릴까?", "이 옷 괜찮아?", "나한테 추천할 만해?"
-    # → 다른 상품 추천이 아니라 현재 상품의 적합성 상담입니다.
-    eval_no_space_words = [
-        "추천할만", "추천할만해", "추천할만한", "추천드릴만", "추천할수있", "추천해도될",
-        "괜찮을까", "괜찮아", "어울릴까", "어울려", "잘어울릴까",
-        "나한테맞", "저한테맞", "좋은선택", "좋은선택일까"
-    ]
-    current_item_words = ["이옷", "이상품", "이바지", "이팬츠", "이슬랙스", "이스커트", "이니트", "이셔츠", "이자켓", "이가디건"]
-    if any(k in no_space for k in eval_no_space_words):
-        return "fit_size"
-    if any(k in no_space for k in current_item_words) and any(k in no_space for k in ["입으면", "맞을까", "어울", "괜찮", "추천"]):
-        return "fit_size"
-
-    # "추천해줘"는 리스트 추천이지만, "추천할 만해?", "나한테 추천할 만한 바지야?"는
-    # 현재 보고 있는 상품이 고객에게 맞는지 평가해 달라는 의미입니다.
-    # 이 분기를 먼저 잡아야 다른 상품 리스트 추천으로 새지 않습니다.
-    if any(k in no_space for k in ["추천할만", "추천할만해", "추천할만한", "추천드릴만", "추천할수있", "추천해도될"]):
-        return "fit_size"
-    if ("나한테" in q or "저한테" in q or "나 같은" in q or "나같은" in q) and "추천" in q and not any(k in q for k in ["추천해줘", "추천해주세요", "골라줘", "골라주세요"]):
-        return "fit_size"
-
-    explicit_cat = explicit_target_category_from_text(q)
-    # 사용자가 특정 카테고리 + 추천/코디/어울림을 말하면, 현재 상품이 무엇이든 코디추천으로 처리
-    if explicit_cat and any(k in q for k in ["추천", "코디", "어울", "같이", "입을", "매치"]):
-        return "coordi_recommend"
-
-    if any(k in q for k in ["어울리는", "같이 입", "코디", "안에 입", "신발", "가방", "머플러"]):
-        return "coordi_recommend"
-    if any(k in q for k in ["대체", "말고"]):
-        if explicit_target_category_from_text(q):
-            return "coordi_recommend"
-        return "alternative_recommend"
-    if any(k in q for k in ["비슷", "다른", "대신", "더 좋은", "더 나은", "추천"]):
-        return "alternative_recommend"
-    if any(k in q for k in ["배송", "교환", "반품", "환불", "출고"]):
+    # 정책 문의 (명확한 CS 키워드)
+    if any(k in q for k in ["배송일", "출고일", "교환 방법", "반품 방법", "환불 방법"]):
         return "policy"
-    if any(k in q for k in ["힙", "허벅지", "골반", "복부", "상체", "가슴", "다리", "짧", "키", "맞", "사이즈", "핏", "작", "클", "여유", "타이트"]):
+    return None
+
+
+def _gpt_intent(user_text: str, current_product_name: str = "") -> str:
+    """
+    GPT-4.1-mini로 고객 의도를 자연어 이해 기반으로 분류.
+    캐싱: 동일 텍스트는 재호출 없이 캐시에서 반환.
+    """
+    cache_key = user_text.strip()
+    cache = st.session_state.get("intent_cache", {})
+    if cache_key in cache:
+        return cache[cache_key]
+
+    client = openai_client()
+    if client is None:
+        return _fallback_rule_intent(user_text)
+
+    system = """너는 온라인 쇼핑몰 고객 메시지의 의도를 분류하는 분류기다.
+아래 9가지 중 하나만 JSON으로 반환한다. 다른 말은 절대 쓰지 않는다.
+
+의도 목록:
+- affirm: 단순 동의/확인 ("응", "좋아", "그래요")
+- followup_selected: 추천 목록 중 번호 선택 ("1번", "두 번째 거")
+- option_choice: 스타일 옵션 직접 선택 ("일자로 할게요", "부츠컷")
+- fit_size: 현재 상품이 본인에게 맞는지/어울리는지 상담 ("힙이 있는데 괜찮을까요?", "저한테 맞을까요?", "이 옷 어때요?", "사이즈 어떻게 골라요?", "체형 커버 돼요?")
+- coordi_recommend: 현재 상품과 함께 입을 다른 상품 추천 요청 ("어울리는 자켓", "같이 입을 바지", "코디 추천")
+- alternative_recommend: 현재 상품 대신 다른 상품 추천 요청 ("비슷한 거 없어요?", "다른 거 추천해줘", "대신 뭐가 좋을까요?")
+- color: 색상/컬러 관련 질문 ("무슨 색 있어요?", "블랙이랑 베이지 중 뭐가 나아요?")
+- feature: 상품 특징/장점 질문 ("이 옷 뭐가 좋아요?", "특징이 뭐예요?")
+- compare: 두 상품 비교 ("이거랑 저거 중 뭐가 나아요?")
+- policy: 배송/교환/반품/환불 문의
+- general: 위 어디에도 해당 안 됨
+
+응답 형식 (JSON만, 다른 텍스트 없이):
+{"intent": "fit_size"}"""
+
+    user_msg = f"현재 상품: {current_product_name}\n고객 메시지: {user_text}"
+
+    try:
+        resp = client.chat.completions.create(
+            model=os.environ.get("OPENAI_MODEL", "gpt-4.1-mini"),
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user_msg},
+            ],
+            temperature=0.0,
+            max_tokens=30,
+        )
+        raw = resp.choices[0].message.content.strip()
+        m = re.search(r'"intent"\s*:\s*"([a-z_]+)"', raw)
+        intent = m.group(1) if m else "general"
+        # 알 수 없는 라벨 방어
+        valid = {"affirm","followup_selected","option_choice","fit_size",
+                 "coordi_recommend","alternative_recommend","color",
+                 "feature","compare","policy","general"}
+        if intent not in valid:
+            intent = "general"
+    except Exception as e:
+        st.session_state.last_error = f"gpt_intent: {e}"
+        intent = _fallback_rule_intent(user_text)
+
+    # 캐시 저장 (최대 200개 유지)
+    cache[cache_key] = intent
+    if len(cache) > 200:
+        oldest = next(iter(cache))
+        del cache[oldest]
+    st.session_state.intent_cache = cache
+    return intent
+
+
+def _fallback_rule_intent(user_text: str) -> str:
+    """GPT 실패 시 기존 키워드 규칙으로 최소한의 분류."""
+    q = clean_text(user_text)
+    no_space = q.replace(" ", "")
+    if any(k in q for k in ["코디", "어울리는", "같이 입", "신발", "가방"]):
+        return "coordi_recommend"
+    if any(k in q for k in ["비슷", "다른", "대신", "추천해줘", "추천해주세요"]):
+        return "alternative_recommend"
+    if any(k in q for k in ["배송", "교환", "반품", "환불"]):
+        return "policy"
+    if any(k in q for k in ["힙", "사이즈", "핏", "체형", "맞", "어울"]):
         return "fit_size"
+    if any(k in q for k in ["색상", "컬러", "블랙", "베이지", "아이보리"]):
+        return "color"
     return "general"
 
+
+def detect_intent(user_text: str, current: Dict = None) -> str:
+    """
+    메인 의도 분류 함수.
+    1) 즉답 규칙 케이스 먼저 확인 (GPT 호출 없음)
+    2) 나머지는 GPT로 자연어 분류
+    """
+    # 즉답 규칙 우선
+    rule_result = _rule_intent(user_text)
+    if rule_result is not None:
+        return rule_result
+
+    # GPT 분류
+    product_name = ""
+    if current:
+        product_name = clean_text(current.get("product_name", ""))
+    return _gpt_intent(user_text, product_name)
 
 # =========================================================
 # 후보 검색
@@ -697,7 +766,7 @@ def product_category_group(current: Dict) -> str:
 
 def build_consultation_lock(user_text: str, current: Dict) -> Dict:
     group = product_category_group(current)
-    intent = detect_intent(user_text)
+    intent = detect_intent(user_text, current)
     concerns = []
     if is_ratio_question(user_text): concerns.append("ratio")
     if is_hip_question(user_text): concerns.append("hip")
@@ -1388,7 +1457,7 @@ def markdown_product_line(i: int, row: Dict) -> str:
 
 
 def build_recommendation_answer(user_text: str, current: Dict) -> str:
-    intent = detect_intent(user_text)
+    intent = detect_intent(user_text, current)
     if intent not in ["coordi_recommend", "alternative_recommend"]:
         return ""
 
@@ -1449,7 +1518,7 @@ def build_recommendation_answer(user_text: str, current: Dict) -> str:
 def call_gpt(user_text: str, current: Dict) -> Optional[str]:
     client = openai_client()
     if client is None: return None
-    intent = detect_intent(user_text)
+    intent = detect_intent(user_text, current)
     payload = build_context_payload(intent, user_text, current)
     try:
         model_name = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
@@ -1482,7 +1551,7 @@ def call_gpt(user_text: str, current: Dict) -> Optional[str]:
 # GPT 미사용 시 안전 fallback
 # =========================================================
 def fallback_answer(user_text: str, current: Dict) -> str:
-    intent = detect_intent(user_text)
+    intent = detect_intent(user_text, current)
     call = customer_call()
     name = current.get("product_name", "지금 보시는 상품")
     cat = current.get("category", "")
@@ -1661,7 +1730,7 @@ if user_input:
     maybe_update_selected(user_input)
     st.session_state.messages.append({"role":"user", "content":user_input})
     answer = ""
-    intent = detect_intent(user_input)
+    intent = detect_intent(user_input, current)
     is_recommendation_html = False
 
     # 추천/코디/대체상품은 번호와 상품 링크가 꼬이지 않도록 코드가 직접 리스트를 만듭니다.
