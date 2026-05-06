@@ -438,30 +438,74 @@ def target_category_from_text(text: str, current_category: str = "") -> str:
     return current_category or "기타"
 
 
-def explicit_target_category_from_text(text: str) -> str:
-    """사용자가 직접 말한 카테고리를 최우선으로 잡습니다. 현재 상품 카테고리보다 우선합니다."""
+def explicit_target_category_from_text(text: str, current_category: str = "") -> str:
+    """
+    고객이 추천 받기를 원하는 카테고리를 추출합니다.
+    핵심 로직:
+      1) "셔츠 추천해줘", "자켓 어울려?" 처럼 추천 요청 뒤에 오는 카테고리 우선
+      2) "이 바지랑 셔츠" 처럼 현재 상품 + 원하는 상품이 함께 언급될 때
+         현재 상품(바지) 카테고리를 제외하고 원하는 카테고리(셔츠)를 반환
+      3) 현재 상품과 다른 카테고리가 있으면 그게 원하는 카테고리
+    """
     q = clean_text(text)
-    if any(k in q for k in ["팬츠", "바지", "슬랙스", "데님", "청바지"]):
-        return "팬츠"
-    if any(k in q for k in ["자켓", "재킷", "아우터", "코트", "점퍼", "후드", "야상"]):
-        return "자켓"
-    if "가디건" in q:
-        return "니트"
-    if any(k in q for k in ["블라우스"]):
-        return "블라우스"
-    if any(k in q for k in ["셔츠"]):
-        return "셔츠"
-    if any(k in q for k in ["니트"]):
-        return "니트"
-    if any(k in q for k in ["티셔츠", "티", "상의", "탑"]):
-        return "티셔츠"
-    if any(k in q for k in SHOE_WORDS):
-        return "신발"
-    if any(k in q for k in BAG_WORDS):
-        return "가방"
-    if any(k in q for k in ACC_WORDS):
-        return "악세사리"
-    return ""
+
+    # 카테고리 키워드 매핑 (우선순위: 추천 요청 카테고리 → 상의 → 하의)
+    cat_map = [
+        ("자켓",  ["자켓", "재킷", "아우터", "코트", "점퍼", "후드", "야상", "바람막이", "점퍼"]),
+        ("니트",  ["가디건", "니트", "가디건"]),
+        ("블라우스", ["블라우스"]),
+        ("셔츠",  ["셔츠"]),
+        ("티셔츠", ["티셔츠"]),
+        ("팬츠",  ["팬츠", "바지", "슬랙스", "데님", "청바지"]),
+        ("신발",  SHOE_WORDS),
+        ("가방",  BAG_WORDS),
+        ("악세사리", ACC_WORDS),
+    ]
+
+    # 현재 상품 카테고리 그룹 파악
+    current_is_bottom = any(k in current_category for k in ["팬츠", "바지", "슬랙스", "데님", "스커트", "치마"])
+    current_is_top    = any(k in current_category for k in ["블라우스", "셔츠", "니트", "티셔츠", "탑"])
+    current_is_outer  = any(k in current_category for k in ["자켓", "아우터", "코트", "점퍼"])
+
+    # 언급된 모든 카테고리 수집
+    found_cats = []
+    for cat_name, keywords in cat_map:
+        if any(k in q for k in keywords):
+            found_cats.append(cat_name)
+
+    if not found_cats:
+        return ""
+
+    # 카테고리가 1개면 그대로 반환
+    if len(found_cats) == 1:
+        return found_cats[0]
+
+    # 카테고리가 2개 이상일 때: 현재 상품 카테고리 제외 후 반환
+    # 예) "이 바지랑 셔츠 추천" → [팬츠, 셔츠] → 팬츠(현재상품) 제외 → 셔츠
+    filtered = [c for c in found_cats if not (
+        (c == "팬츠" and current_is_bottom) or
+        (c in ["블라우스", "셔츠", "니트", "티셔츠"] and current_is_top) or
+        (c == "자켓" and current_is_outer)
+    )]
+
+    if filtered:
+        return filtered[0]
+
+    # 현재 상품 제외 후 남은 게 없으면 (모두 현재 상품 카테고리)
+    # → 추천 목적 키워드 기반으로 재판단
+    # "추천해줘", "어울리는" 뒤에 나오는 카테고리 우선
+    import re as _re
+    recommend_pattern = _re.compile(
+        r"(?:추천|어울|같이|코디|어울리는|맞는|좋은)\s*([가-힣A-Za-z]+)",
+        _re.UNICODE
+    )
+    for m in recommend_pattern.finditer(q):
+        word = m.group(1)
+        for cat_name, keywords in cat_map:
+            if any(k in word for k in keywords):
+                return cat_name
+
+    return found_cats[0]
 
 
 def style_contexts_from_text(text: str) -> list:
@@ -1370,10 +1414,12 @@ def strip_numbered_list_from_gpt(text: str) -> str:
     ans = re.sub(r"\s+", " ", ans).strip()
     return ans
 
-def recommendation_heading(intent: str, user_text: str, current: Dict) -> str:
+def recommendation_heading(intent: str, user_text: str, current: Dict, candidates: list = None) -> str:
     q = clean_text(user_text)
     current_name = current.get("product_name", "지금 보시는 상품")
-    explicit_cat = explicit_target_category_from_text(q)
+    # 현재 상품 카테고리를 전달해서 "이 바지랑 셔츠 추천" 같은 케이스를 정확히 처리
+    _current_cat = current.get("category", "") + " " + current_name
+    explicit_cat = explicit_target_category_from_text(q, _current_cat)
     dual = is_dual_office_travel(q)
     if explicit_cat == "팬츠":
         return "같이 입기 좋은 팬츠 쪽으로 골라드릴게요."
@@ -1539,13 +1585,14 @@ def build_recommendation_answer(user_text: str, current: Dict) -> str:
 
     st.session_state.last_recommendations = candidates[:3]
 
-    heading = recommendation_heading(intent, user_text, current)
+    heading = recommendation_heading(intent, user_text, current, candidates)
     item_lines = []
     for i, row in enumerate(candidates[:3], 1):
         item_lines.append(markdown_product_line(i, row))
 
     q = clean_text(user_text)
-    explicit_cat = explicit_target_category_from_text(q)
+    _current_cat_str = current.get("category", "") + " " + (current.get("product_name") or "")
+    explicit_cat = explicit_target_category_from_text(q, _current_cat_str)
     current_group = product_category_group(current)
     # 실제 추천 결과가 팬츠일 때만 팬츠 관련 tail 적용
     _rec_cats = [row_category(r) for r in candidates[:3]] if candidates else []
